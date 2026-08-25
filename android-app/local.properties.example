@@ -1,0 +1,5 @@
+# Copy to local.properties and adjust API_BASE_URL for your PC LAN IP when using a physical device.
+# Android emulator uses 10.0.2.2 to reach the host machine.
+#
+# sdk.dir is normally set automatically by Android Studio.
+# API_BASE_URL=http://192.168.1.100:3001/api/

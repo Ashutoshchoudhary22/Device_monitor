@@ -1,0 +1,77 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Environment & secrets (never commit)
+# .env
+# .env.*
+# !.env.example
+
+# Backend
+backend/node_modules/
+backend/.env
+backend/coverage/
+backend/logs/
+
+# Dashboard
+dashboard/node_modules/
+dashboard/.env
+dashboard/.env.local
+dashboard/.env.development.local
+dashboard/.env.test.local
+dashboard/.env.production.local
+dashboard/.next/
+dashboard/out/
+dashboard/coverage/
+
+# Android
+android-app/.gradle/
+android-app/build/
+android-app/app/build/
+android-app/local.properties
+android-app/.idea/
+android-app/*.iml
+android-app/.cxx/
+android-app/captures/
+android-app/.externalNativeBuild/
+android-app/.kotlin/
+
+# APK / build outputs
+*.apk
+*.aab
+*.ap_
+*.dex
+
+# OS
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Test / cache
+.cache/
+.turbo/
+coverage/
+.nyc_output/
+
+# MongoDB memory server (tests)
+globalConfig.json
+
+# Misc
+*.class
+*.jar
+!gradle/wrapper/gradle-wrapper.jar
