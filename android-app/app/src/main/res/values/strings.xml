@@ -10,7 +10,8 @@
     <string name="start_tracking">Start Tracking</string>
     <string name="stop_tracking">Stop Tracking</string>
     <string name="location_notification_title">Device Monitor</string>
-    <string name="location_notification_text">Location tracking is active</string>
+    <string name="location_notification_text">Location tracking is active — tap to open</string>
+    <string name="notification_permission_rationale">Notification permission is required to show tracking status in the notification bar.</string>
     <string name="permission_location_rationale">Location permission is required to track your device position.</string>
     <string name="permission_background_rationale">Background location is required for continuous tracking when the app is not open.</string>
     <string name="permission_denied">Permission denied. Tracking cannot start.</string>

@@ -100,7 +100,15 @@ class MainActivity : AppCompatActivity() {
 
     private fun requestPermissionsAndStart() {
         if (!PermissionHelper.hasNotificationPermission(this)) {
-            PermissionHelper.requestNotificationPermission(this)
+            AlertDialog.Builder(this)
+                .setTitle("Notification Permission")
+                .setMessage("Notification permission is required to keep location tracking active in the background.")
+                .setPositiveButton("Allow") { _, _ ->
+                    PermissionHelper.requestNotificationPermission(this)
+                }
+                .setNegativeButton("Cancel", null)
+                .show()
+            return
         }
 
         if (!PermissionHelper.hasLocationPermissions(this)) {
@@ -140,6 +148,17 @@ class MainActivity : AppCompatActivity() {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
 
         when (requestCode) {
+            PermissionHelper.REQUEST_NOTIFICATION -> {
+                if (PermissionHelper.hasNotificationPermission(this)) {
+                    requestPermissionsAndStart()
+                } else {
+                    Toast.makeText(
+                        this,
+                        "Notification permission is required for background tracking",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+            }
             PermissionHelper.REQUEST_LOCATION -> {
                 if (PermissionHelper.hasLocationPermissions(this)) {
                     if (!PermissionHelper.hasBackgroundLocation(this)) {
@@ -171,6 +190,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun ensureTrackingActive() {
         if (!LocationForegroundService.isTrackingEnabled(this)) return
+        if (!PermissionHelper.hasNotificationPermission(this)) return
         if (!PermissionHelper.hasLocationPermissions(this)) return
         if (!PermissionHelper.hasBackgroundLocation(this)) return
         if (LocationForegroundService.isRunning(this)) return

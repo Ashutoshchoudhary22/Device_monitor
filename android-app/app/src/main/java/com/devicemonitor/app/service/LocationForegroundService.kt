@@ -8,16 +8,19 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.location.Location
 import android.os.Build
 import android.os.IBinder
 import android.os.Looper
 import android.os.SystemClock
 import androidx.core.app.NotificationCompat
+import androidx.core.app.ServiceCompat
 import com.devicemonitor.app.R
 import com.devicemonitor.app.data.prefs.TokenManager
 import com.devicemonitor.app.data.repository.DeviceRepository
 import com.devicemonitor.app.ui.MainActivity
+import com.devicemonitor.app.util.PermissionHelper
 import com.google.android.gms.location.LocationCallback
 import com.google.android.gms.location.LocationRequest
 import com.google.android.gms.location.LocationResult
@@ -56,15 +59,37 @@ class LocationForegroundService : Service() {
                 stopTracking(userInitiated = true)
                 return START_NOT_STICKY
             }
-            else -> startTracking()
+            else -> {
+                promoteToForeground()
+                startTracking()
+            }
         }
         return START_STICKY
     }
 
+    private fun promoteToForeground() {
+        val notification = buildNotification()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            ServiceCompat.startForeground(
+                this,
+                NOTIFICATION_ID,
+                notification,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
+            )
+        } else {
+            startForeground(NOTIFICATION_ID, notification)
+        }
+    }
+
     private fun startTracking() {
         tokenManager.setTrackingEnabled(true)
-        startForeground(NOTIFICATION_ID, buildNotification())
-        repository.connectSocket()
+        updateNotification()
+        repository.connectSocket {
+            serviceScope.launch {
+                repository.sendStatus(true)
+                repository.sendBattery()
+            }
+        }
         startLocationUpdates()
         fetchImmediateLocation()
         startPeriodicStatusUpdates()
@@ -79,11 +104,11 @@ class LocationForegroundService : Service() {
     private fun stopTracking(userInitiated: Boolean) {
         if (userInitiated) {
             tokenManager.setTrackingEnabled(false)
+            serviceScope.launch { repository.sendStatus(false) }
             repository.disconnectSocket()
         }
         stopLocationUpdates()
         statusJob?.cancel()
-        serviceScope.launch { repository.sendStatus(false) }
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
@@ -152,7 +177,15 @@ class LocationForegroundService : Service() {
                 timestamp = repository.createLocationTimestamp()
             )
             repository.sendBattery()
+            updateNotification(
+                "Tracking · ${String.format("%.5f", location.latitude)}, ${String.format("%.5f", location.longitude)}"
+            )
         }
+    }
+
+    private fun updateNotification(subtitle: String? = null) {
+        val manager = getSystemService(NotificationManager::class.java)
+        manager.notify(NOTIFICATION_ID, buildNotification(subtitle))
     }
 
     private fun stopLocationUpdates() {
@@ -169,7 +202,7 @@ class LocationForegroundService : Service() {
                 repository.sendStatus(true)
                 repository.sendBattery()
                 repository.syncQueuedLocations()
-                delay(60_000)
+                delay(30_000)
             }
         }
     }
@@ -224,18 +257,24 @@ class LocationForegroundService : Service() {
     }
 
     private fun createNotificationChannel() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+
+        val manager = getSystemService(NotificationManager::class.java)
+        manager.deleteNotificationChannel(CHANNEL_ID_LEGACY)
+
         val channel = NotificationChannel(
             CHANNEL_ID,
             getString(R.string.location_notification_title),
-            NotificationManager.IMPORTANCE_LOW
+            NotificationManager.IMPORTANCE_DEFAULT
         ).apply {
             description = getString(R.string.location_notification_text)
+            setShowBadge(true)
+            lockscreenVisibility = Notification.VISIBILITY_PUBLIC
         }
-        val manager = getSystemService(NotificationManager::class.java)
         manager.createNotificationChannel(channel)
     }
 
-    private fun buildNotification(): Notification {
+    private fun buildNotification(subtitle: String? = null): Notification {
         val openIntent = PendingIntent.getActivity(
             this,
             0,
@@ -252,11 +291,15 @@ class LocationForegroundService : Service() {
 
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle(getString(R.string.location_notification_title))
-            .setContentText(getString(R.string.location_notification_text))
+            .setContentText(subtitle ?: getString(R.string.location_notification_text))
             .setSmallIcon(R.drawable.ic_location)
             .setContentIntent(openIntent)
             .addAction(0, getString(R.string.stop_tracking), stopIntent)
             .setOngoing(true)
+            .setOnlyAlertOnce(true)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setCategory(NotificationCompat.CATEGORY_SERVICE)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
             .build()
     }
@@ -264,12 +307,18 @@ class LocationForegroundService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     companion object {
-        const val CHANNEL_ID = "location_tracking"
+        const val CHANNEL_ID = "location_tracking_v2"
+        private const val CHANNEL_ID_LEGACY = "location_tracking"
         const val NOTIFICATION_ID = 1001
         const val ACTION_STOP = "com.devicemonitor.app.ACTION_STOP_TRACKING"
         private const val RESTART_REQUEST_CODE = 2001
 
         fun start(context: Context) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                !PermissionHelper.hasNotificationPermission(context)
+            ) {
+                return
+            }
             val intent = Intent(context, LocationForegroundService::class.java)
             context.startForegroundService(intent)
         }

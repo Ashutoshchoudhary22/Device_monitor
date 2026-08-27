@@ -12,6 +12,11 @@ import kotlin.coroutines.resume
 class SocketManager(private val tokenManager: TokenManager) {
 
     private var socket: Socket? = null
+    private var onReconnectListener: (() -> Unit)? = null
+
+    fun setOnReconnectListener(listener: (() -> Unit)?) {
+        onReconnectListener = listener
+    }
 
     @Synchronized
     fun connect(): Socket {
@@ -22,6 +27,11 @@ class SocketManager(private val tokenManager: TokenManager) {
             return socket!!
         }
 
+        if (socket != null && !socket!!.connected()) {
+            socket!!.connect()
+            return socket!!
+        }
+
         disconnect()
 
         val options = IO.Options().apply {
@@ -29,11 +39,16 @@ class SocketManager(private val tokenManager: TokenManager) {
             reconnection = true
             reconnectionAttempts = Int.MAX_VALUE
             reconnectionDelay = 1000
+            reconnectionDelayMax = 5000
             transports = arrayOf("websocket", "polling")
             timeout = 15000
         }
 
-        socket = IO.socket(BuildConfig.SOCKET_URL, options)
+        socket = IO.socket(BuildConfig.SOCKET_URL, options).apply {
+            on(Socket.EVENT_CONNECT) {
+                onReconnectListener?.invoke()
+            }
+        }
         socket!!.connect()
         return socket!!
     }
@@ -55,6 +70,7 @@ class SocketManager(private val tokenManager: TokenManager) {
 
     @Synchronized
     fun disconnect() {
+        socket?.off(Socket.EVENT_CONNECT)
         socket?.disconnect()
         socket?.off()
         socket = null
@@ -62,13 +78,17 @@ class SocketManager(private val tokenManager: TokenManager) {
 
     fun isConnected(): Boolean = socket?.connected() == true
 
+    @Synchronized
+    fun ensureConnected(): Socket {
+        return if (isConnected()) socket!! else connect()
+    }
+
     suspend fun emitAck(event: String, data: JSONObject, guest: Boolean = false): JSONObject {
         return suspendCancellableCoroutine { cont ->
             try {
                 val activeSocket = when {
                     guest -> connectGuest()
-                    isConnected() -> socket!!
-                    else -> connect()
+                    else -> ensureConnected()
                 }
 
                 activeSocket.emit(event, data, Ack { args ->

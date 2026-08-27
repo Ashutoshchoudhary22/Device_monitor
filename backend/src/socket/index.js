@@ -284,20 +284,9 @@ function setupSocket(io) {
       }
     });
 
-    socket.on('disconnect', async () => {
+    socket.on('disconnect', () => {
       console.log(`Socket disconnected: ${socket.userId || 'guest'}`);
-      if (!socket.userId || !socket.deviceId) return;
-
-      try {
-        await deviceEvents.recordStatus(
-          socket.userId,
-          socket.deviceId,
-          { isOnline: false },
-          io
-        );
-      } catch (err) {
-        console.error('Failed to mark device offline:', err.message);
-      }
+      // Device stays online until app explicitly sends device:status isOnline:false
     });
   });
 }

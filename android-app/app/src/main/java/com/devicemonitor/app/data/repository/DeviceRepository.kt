@@ -33,10 +33,10 @@ class DeviceRepository(private val context: Context) {
     fun getUpdateInterval(): Int = tokenManager.getUpdateInterval()
     fun setUpdateInterval(seconds: Int) = tokenManager.saveUpdateInterval(seconds)
 
-    fun connectSocket() {
-        if (tokenManager.getToken() != null) {
-            socketManager.connect()
-        }
+    fun connectSocket(onReconnect: (() -> Unit)? = null) {
+        if (tokenManager.getToken() == null) return
+        socketManager.setOnReconnectListener(onReconnect)
+        socketManager.connect()
     }
 
     fun disconnectSocket() {

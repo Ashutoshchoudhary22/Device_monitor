@@ -7,6 +7,9 @@ import com.devicemonitor.app.data.prefs.TokenManager
 import com.devicemonitor.app.data.repository.DeviceRepository
 import com.devicemonitor.app.service.LocationForegroundService
 import com.devicemonitor.app.util.PermissionHelper
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 
 class DeviceMonitorApp : Application(), Configuration.Provider {
     override fun onCreate() {
@@ -22,7 +25,13 @@ class DeviceMonitorApp : Application(), Configuration.Provider {
         if (!PermissionHelper.hasBackgroundLocation(this)) return
 
         val repository = DeviceRepository(this)
-        repository.connectSocket()
+        repository.connectSocket {
+            if (tokenManager.isTrackingEnabled()) {
+                CoroutineScope(Dispatchers.IO).launch {
+                    repository.sendStatus(true)
+                }
+            }
+        }
 
         if (LocationForegroundService.isRunning(this)) return
         LocationForegroundService.start(this)
