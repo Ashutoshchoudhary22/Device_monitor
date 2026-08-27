@@ -34,6 +34,7 @@ const deviceSchema = new mongoose.Schema(
     mobileDataAvailable: { type: Boolean, default: false },
     lastLatitude: { type: Number, default: null },
     lastLongitude: { type: Number, default: null },
+    lastAddress: { type: String, default: null },
     lastAccuracy: { type: Number, default: null },
     lastAltitude: { type: Number, default: null },
     lastSpeed: { type: Number, default: null },

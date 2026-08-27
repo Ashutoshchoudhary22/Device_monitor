@@ -15,6 +15,7 @@ const locationSchema = new mongoose.Schema(
     },
     latitude: { type: Number, required: true },
     longitude: { type: Number, required: true },
+    address: { type: String, default: null },
     accuracy: { type: Number, default: null },
     altitude: { type: Number, default: null },
     speed: { type: Number, default: null },

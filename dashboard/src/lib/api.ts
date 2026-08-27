@@ -26,6 +26,7 @@ export interface Device {
   mobileDataAvailable: boolean;
   lastLatitude: number | null;
   lastLongitude: number | null;
+  lastAddress: string | null;
   lastAccuracy: number | null;
   lastAltitude: number | null;
   lastSpeed: number | null;
@@ -38,6 +39,7 @@ export interface LocationPoint {
   _id: string;
   latitude: number;
   longitude: number;
+  address: string | null;
   accuracy: number | null;
   altitude: number | null;
   speed: number | null;

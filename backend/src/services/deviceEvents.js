@@ -2,6 +2,7 @@ const Device = require('../models/Device');
 const Location = require('../models/Location');
 const DeviceStatus = require('../models/DeviceStatus');
 const config = require('../config');
+const { reverseGeocode } = require('./geocoding');
 const {
   sanitizeString,
   isValidDeviceId,
@@ -141,10 +142,16 @@ async function recordLocation(userId, deviceId, data, io) {
     timestamp: ts,
   };
 
+  const address = await reverseGeocode(lat, lng);
+  if (address) {
+    locationData.address = address;
+  }
+
   const location = await Location.create(locationData);
 
   device.lastLatitude = lat;
   device.lastLongitude = lng;
+  device.lastAddress = address || device.lastAddress;
   device.lastAccuracy = locationData.accuracy;
   device.lastAltitude = locationData.altitude;
   device.lastSpeed = locationData.speed;
@@ -159,6 +166,7 @@ async function recordLocation(userId, deviceId, data, io) {
     deviceId,
     latitude: lat,
     longitude: lng,
+    address: device.lastAddress,
     accuracy: locationData.accuracy,
     altitude: locationData.altitude,
     speed: locationData.speed,

@@ -35,6 +35,16 @@ export default function DevicesPage() {
     setDevices((prev) =>
       prev.map((d) => {
         if (d.deviceId !== deviceId) return d;
+        if (event === 'device:location') {
+          return {
+            ...d,
+            lastLatitude: payload.latitude as number,
+            lastLongitude: payload.longitude as number,
+            lastAddress: (payload.address as string) || d.lastAddress,
+            isOnline: true,
+            lastSeen: new Date().toISOString(),
+          };
+        }
         return {
           ...d,
           isOnline: event === 'device:offline' ? false : event === 'device:online' ? true : d.isOnline,
@@ -81,6 +91,18 @@ export default function DevicesPage() {
                 </span>
               </div>
               <dl className="space-y-2 text-sm">
+                <div className="flex justify-between gap-4">
+                  <dt className="text-gray-500 shrink-0">Location</dt>
+                  <dd className="text-right">
+                    {device.lastAddress ? (
+                      <span className="line-clamp-2">{device.lastAddress}</span>
+                    ) : device.lastLatitude && device.lastLongitude ? (
+                      <span>{device.lastLatitude.toFixed(4)}, {device.lastLongitude.toFixed(4)}</span>
+                    ) : (
+                      '—'
+                    )}
+                  </dd>
+                </div>
                 <div className="flex justify-between">
                   <dt className="text-gray-500">Model</dt>
                   <dd>{device.manufacturer} {device.model}</dd>

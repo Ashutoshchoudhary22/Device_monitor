@@ -8,6 +8,7 @@ import StatCard from '@/components/StatCard';
 import { useAuth } from '@/hooks/useAuth';
 import { useSocket } from '@/hooks/useSocket';
 import { api, Device } from '@/lib/api';
+import LocationAddress from '@/components/LocationAddress';
 import { useToast } from '@/context/ToastContext';
 
 const MapView = dynamic(() => import('@/components/MapView'), { ssr: false });
@@ -46,6 +47,7 @@ export default function DashboardPage() {
             ...d,
             lastLatitude: payload.latitude as number,
             lastLongitude: payload.longitude as number,
+            lastAddress: (payload.address as string) || d.lastAddress,
             lastAccuracy: payload.accuracy as number,
             lastLocationTimestamp: payload.timestamp as string,
             isOnline: true,
@@ -125,7 +127,13 @@ export default function DashboardPage() {
 
             {mapDevice && mapDevice.lastLatitude && mapDevice.lastLongitude && (
               <div className="mb-8">
-                <h2 className="text-lg font-semibold mb-4">Latest Location — {mapDevice.deviceName}</h2>
+                <h2 className="text-lg font-semibold mb-2">Latest Location — {mapDevice.deviceName}</h2>
+                <LocationAddress
+                  className="mb-4"
+                  address={mapDevice.lastAddress}
+                  latitude={mapDevice.lastLatitude}
+                  longitude={mapDevice.lastLongitude}
+                />
                 <MapView
                   latitude={mapDevice.lastLatitude}
                   longitude={mapDevice.lastLongitude}
@@ -145,6 +153,9 @@ export default function DashboardPage() {
                   <div>
                     <p className="font-medium">{device.deviceName}</p>
                     <p className="text-sm text-gray-500">{device.manufacturer} {device.model}</p>
+                    {device.lastAddress && (
+                      <p className="text-xs text-gray-400 mt-1 line-clamp-1">{device.lastAddress}</p>
+                    )}
                   </div>
                   <div className="flex items-center gap-4 text-sm">
                     <span className={device.isOnline ? 'text-green-600' : 'text-gray-400'}>

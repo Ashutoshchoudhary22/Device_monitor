@@ -6,6 +6,7 @@ import Link from 'next/link';
 import Navbar from '@/components/Navbar';
 import { useAuth } from '@/hooks/useAuth';
 import { api, LocationPoint } from '@/lib/api';
+import LocationAddress from '@/components/LocationAddress';
 
 const MapView = dynamic(() => import('@/components/MapView'), { ssr: false });
 
@@ -45,8 +46,9 @@ export default function HistoryPage({ params }: { params: { deviceId: string } }
   if (!ready) return null;
 
   const path: Array<[number, number]> = locations.map((l) => [l.latitude, l.longitude]);
-  const centerLat = locations.length > 0 ? locations[locations.length - 1].latitude : 28.6139;
-  const centerLng = locations.length > 0 ? locations[locations.length - 1].longitude : 77.209;
+  const latest = locations.length > 0 ? locations[locations.length - 1] : null;
+  const centerLat = latest?.latitude ?? 28.6139;
+  const centerLng = latest?.longitude ?? 77.209;
 
   return (
     <div className="min-h-screen bg-gray-50 dark:bg-gray-900">
@@ -95,7 +97,35 @@ export default function HistoryPage({ params }: { params: { deviceId: string } }
               </div>
             </div>
 
+            {latest && (
+              <div className="rounded-xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-4">
+                <p className="text-sm text-gray-500 mb-2">Latest point</p>
+                <LocationAddress
+                  address={latest.address}
+                  latitude={latest.latitude}
+                  longitude={latest.longitude}
+                />
+              </div>
+            )}
+
             <MapView latitude={centerLat} longitude={centerLng} path={path} height="500px" />
+
+            <div className="rounded-xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 overflow-hidden">
+              <div className="px-4 py-3 border-b border-gray-200 dark:border-gray-700">
+                <h2 className="font-semibold">Location Points</h2>
+              </div>
+              <div className="max-h-80 overflow-y-auto divide-y divide-gray-100 dark:divide-gray-700">
+                {[...locations].reverse().map((point) => (
+                  <div key={point._id} className="px-4 py-3 text-sm">
+                    <p className="font-medium">{point.address || 'Address not available'}</p>
+                    <p className="text-xs text-gray-500 mt-1">
+                      {point.latitude.toFixed(6)}, {point.longitude.toFixed(6)} ·{' '}
+                      {new Date(point.timestamp).toLocaleString()}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            </div>
           </div>
         )}
       </main>

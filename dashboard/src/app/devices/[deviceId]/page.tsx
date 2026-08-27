@@ -7,6 +7,7 @@ import Navbar from '@/components/Navbar';
 import { useAuth } from '@/hooks/useAuth';
 import { useSocket } from '@/hooks/useSocket';
 import { api, Device } from '@/lib/api';
+import LocationAddress from '@/components/LocationAddress';
 
 const MapView = dynamic(() => import('@/components/MapView'), { ssr: false });
 
@@ -44,6 +45,7 @@ export default function DeviceDetailPage({ params }: { params: { deviceId: strin
           ...prev,
           lastLatitude: payload.latitude as number,
           lastLongitude: payload.longitude as number,
+          lastAddress: (payload.address as string) || prev.lastAddress,
           lastAccuracy: payload.accuracy as number,
           lastAltitude: payload.altitude as number,
           lastSpeed: payload.speed as number,
@@ -104,11 +106,21 @@ export default function DeviceDetailPage({ params }: { params: { deviceId: strin
         {device && (
           <div className="space-y-8">
             {device.lastLatitude && device.lastLongitude ? (
-              <MapView
-                latitude={device.lastLatitude}
-                longitude={device.lastLongitude}
-                height="450px"
-              />
+              <div className="space-y-3">
+                <div className="rounded-xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-4">
+                  <p className="text-sm text-gray-500 dark:text-gray-400 mb-2">Current Location</p>
+                  <LocationAddress
+                    address={device.lastAddress}
+                    latitude={device.lastLatitude}
+                    longitude={device.lastLongitude}
+                  />
+                </div>
+                <MapView
+                  latitude={device.lastLatitude}
+                  longitude={device.lastLongitude}
+                  height="450px"
+                />
+              </div>
             ) : (
               <div className="rounded-xl border border-dashed border-gray-300 dark:border-gray-600 p-12 text-center text-gray-500">
                 No location data yet. Enable tracking on the device.
@@ -116,6 +128,10 @@ export default function DeviceDetailPage({ params }: { params: { deviceId: strin
             )}
 
             <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-4">
+              <div className="rounded-xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-4 md:col-span-2 lg:col-span-3">
+                <p className="text-sm text-gray-500 dark:text-gray-400">Place / Address</p>
+                <p className="mt-1 font-medium">{device.lastAddress || '—'}</p>
+              </div>
               <InfoCard label="Latitude" value={device.lastLatitude?.toFixed(6) ?? '—'} />
               <InfoCard label="Longitude" value={device.lastLongitude?.toFixed(6) ?? '—'} />
               <InfoCard label="Accuracy" value={device.lastAccuracy ? `${device.lastAccuracy} m` : '—'} />
