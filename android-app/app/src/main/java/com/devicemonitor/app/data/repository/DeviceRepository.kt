@@ -10,8 +10,10 @@ import com.devicemonitor.app.data.db.AppDatabase
 import com.devicemonitor.app.data.db.LocationQueueEntity
 import com.devicemonitor.app.data.prefs.TokenManager
 import com.devicemonitor.app.data.socket.SocketManager
+import com.devicemonitor.app.util.BatteryInfo
 import com.devicemonitor.app.util.BatteryMonitor
 import com.devicemonitor.app.util.DeviceIdManager
+import com.devicemonitor.app.util.NetworkInfo
 import com.devicemonitor.app.util.NetworkMonitor
 import org.json.JSONObject
 import java.time.Instant
@@ -239,7 +241,7 @@ class DeviceRepository(private val context: Context) {
 
     private suspend fun sendStatusViaRest(
         isOnline: Boolean,
-        info: com.devicemonitor.app.util.NetworkMonitor.NetworkInfo
+        info: NetworkInfo
     ): Boolean {
         return try {
             val response = api.postStatus(
@@ -280,7 +282,7 @@ class DeviceRepository(private val context: Context) {
         }
     }
 
-    private suspend fun sendBatteryViaRest(info: com.devicemonitor.app.util.BatteryMonitor.BatteryInfo): Boolean {
+    private suspend fun sendBatteryViaRest(info: BatteryInfo): Boolean {
         return try {
             val response = api.postBattery(
                 getDeviceId(),
