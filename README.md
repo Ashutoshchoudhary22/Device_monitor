@@ -212,7 +212,66 @@ The app requests permissions at runtime. You may need to grant these manually in
 
 ---
 
-## 10. Production Deployment
+## 10. Production Deployment (device.faltu.shop)
+
+Production domain: **https://device.faltu.shop**
+
+| Service | URL |
+|---------|-----|
+| Dashboard | `https://device.faltu.shop` |
+| API | `https://device.faltu.shop/api` |
+| Socket.IO | `https://device.faltu.shop` |
+| Health check | `https://device.faltu.shop/health` |
+
+### Environment (already configured)
+
+**backend/.env**
+```
+CORS_ORIGIN=https://device.faltu.shop
+```
+
+**dashboard/.env**
+```
+NEXT_PUBLIC_API_URL=https://device.faltu.shop/api
+NEXT_PUBLIC_SOCKET_URL=https://device.faltu.shop
+```
+
+**Android release APK** uses `https://device.faltu.shop/api/` (debug build still uses LAN IP).
+
+### VPS Deploy (Ubuntu + nginx + PM2)
+
+1. Upload project to `/var/www/device-monitor` (or clone from git)
+2. Copy `backend/.env` and `dashboard/.env` to the server
+3. Run on the server:
+
+```bash
+cd /var/www/device-monitor
+sudo bash deploy/setup-server.sh
+```
+
+Or manually:
+
+```bash
+# Backend
+cd backend && npm ci --omit=dev
+
+# Dashboard
+cd dashboard && npm ci && npm run build
+
+# PM2
+pm2 start deploy/ecosystem.config.cjs
+pm2 save
+
+# nginx
+sudo cp deploy/nginx/device.faltu.shop.conf /etc/nginx/sites-available/
+sudo ln -sf /etc/nginx/sites-available/device.faltu.shop /etc/nginx/sites-enabled/
+sudo certbot --nginx -d device.faltu.shop
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+### DNS
+
+Point `device.faltu.shop` A record to your VPS IP (currently `193.203.161.127`).
 
 ### Backend
 
