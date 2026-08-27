@@ -6,6 +6,7 @@ import io.socket.client.Ack
 import io.socket.client.IO
 import io.socket.client.Socket
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
 import kotlin.coroutines.resume
 
@@ -84,25 +85,31 @@ class SocketManager(private val tokenManager: TokenManager) {
     }
 
     suspend fun emitAck(event: String, data: JSONObject, guest: Boolean = false): JSONObject {
-        return suspendCancellableCoroutine { cont ->
-            try {
-                val activeSocket = when {
-                    guest -> connectGuest()
-                    else -> ensureConnected()
-                }
+        return withTimeoutOrNull(EMIT_TIMEOUT_MS) {
+            suspendCancellableCoroutine { cont ->
+                try {
+                    val activeSocket = when {
+                        guest -> connectGuest()
+                        else -> ensureConnected()
+                    }
 
-                activeSocket.emit(event, data, Ack { args ->
-                    val response = args.firstOrNull() as? JSONObject
-                        ?: JSONObject().put("ok", false).put("error", "Empty response")
-                    cont.resume(response)
-                })
-            } catch (e: Exception) {
-                cont.resume(
-                    JSONObject()
-                        .put("ok", false)
-                        .put("error", e.message ?: "Socket error")
-                )
+                    activeSocket.emit(event, data, Ack { args ->
+                        val response = args.firstOrNull() as? JSONObject
+                            ?: JSONObject().put("ok", false).put("error", "Empty response")
+                        cont.resume(response)
+                    })
+                } catch (e: Exception) {
+                    cont.resume(
+                        JSONObject()
+                            .put("ok", false)
+                            .put("error", e.message ?: "Socket error")
+                    )
+                }
             }
-        }
+        } ?: JSONObject().put("ok", false).put("error", "Socket timeout")
+    }
+
+    companion object {
+        private const val EMIT_TIMEOUT_MS = 8_000L
     }
 }

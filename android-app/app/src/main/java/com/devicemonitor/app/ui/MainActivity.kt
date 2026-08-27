@@ -15,6 +15,7 @@ import com.devicemonitor.app.databinding.ActivityMainBinding
 import com.devicemonitor.app.service.LocationForegroundService
 import com.devicemonitor.app.util.BatteryMonitor
 import com.devicemonitor.app.util.NetworkMonitor
+import com.devicemonitor.app.util.DeviceUtils
 import com.devicemonitor.app.util.PermissionHelper
 import com.devicemonitor.app.worker.SyncWorker
 import kotlinx.coroutines.launch
@@ -102,7 +103,7 @@ class MainActivity : AppCompatActivity() {
         if (!PermissionHelper.hasNotificationPermission(this)) {
             AlertDialog.Builder(this)
                 .setTitle("Notification Permission")
-                .setMessage("Notification permission is required to keep location tracking active in the background.")
+                .setMessage(getString(com.devicemonitor.app.R.string.notification_permission_rationale))
                 .setPositiveButton("Allow") { _, _ ->
                     PermissionHelper.requestNotificationPermission(this)
                 }
@@ -135,9 +136,50 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
+        if (!PermissionHelper.isBatteryOptimizationIgnored(this)) {
+            AlertDialog.Builder(this)
+                .setTitle("Battery Optimization")
+                .setMessage(getString(com.devicemonitor.app.R.string.battery_optimization_rationale))
+                .setPositiveButton("Allow") { _, _ ->
+                    PermissionHelper.requestIgnoreBatteryOptimizations(this)
+                }
+                .setNegativeButton("Skip") { _, _ ->
+                    showMiuiSetupIfNeeded()
+                }
+                .show()
+            return
+        }
+
+        showMiuiSetupIfNeeded()
+    }
+
+    private fun showMiuiSetupIfNeeded() {
+        if (!DeviceUtils.isMiui()) {
+            startTrackingInternal()
+            return
+        }
+
+        AlertDialog.Builder(this)
+            .setTitle(getString(com.devicemonitor.app.R.string.miui_setup_title))
+            .setMessage(getString(com.devicemonitor.app.R.string.miui_setup_message))
+            .setPositiveButton(getString(com.devicemonitor.app.R.string.miui_autostart)) { _, _ ->
+                PermissionHelper.openMiuiAutostartSettings(this)
+                startTrackingInternal()
+            }
+            .setNegativeButton(getString(com.devicemonitor.app.R.string.miui_skip)) { _, _ ->
+                startTrackingInternal()
+            }
+            .show()
+    }
+
+    private fun startTrackingInternal() {
         LocationForegroundService.start(this)
-        PermissionHelper.requestIgnoreBatteryOptimizations(this)
         updateStatusUi()
+        Toast.makeText(
+            this,
+            "Tracking started. Keep notification visible in status bar.",
+            Toast.LENGTH_LONG
+        ).show()
     }
 
     override fun onRequestPermissionsResult(
@@ -161,25 +203,25 @@ class MainActivity : AppCompatActivity() {
             }
             PermissionHelper.REQUEST_LOCATION -> {
                 if (PermissionHelper.hasLocationPermissions(this)) {
-                    if (!PermissionHelper.hasBackgroundLocation(this)) {
-                        PermissionHelper.requestBackgroundLocation(this)
-                    } else {
-                        LocationForegroundService.start(this)
-                        updateStatusUi()
-                    }
+                    requestPermissionsAndStart()
                 } else {
                     showPermissionDenied()
                 }
             }
             PermissionHelper.REQUEST_BACKGROUND -> {
                 if (PermissionHelper.hasBackgroundLocation(this)) {
-                    LocationForegroundService.start(this)
-                    updateStatusUi()
+                    requestPermissionsAndStart()
                 } else {
                     showPermissionDenied()
                 }
             }
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        ensureTrackingActive()
+        updateStatusUi()
     }
 
     private fun showPermissionDenied() {
@@ -222,11 +264,5 @@ class MainActivity : AppCompatActivity() {
         binding.networkText.text = "Network: ${network.networkType}" +
             (if (network.wifiAvailable) " · WiFi" else "") +
             (if (network.mobileDataAvailable) " · Mobile" else "")
-    }
-
-    override fun onResume() {
-        super.onResume()
-        ensureTrackingActive()
-        updateStatusUi()
     }
 }

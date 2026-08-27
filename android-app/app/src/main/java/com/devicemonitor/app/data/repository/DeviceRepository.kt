@@ -3,6 +3,7 @@ package com.devicemonitor.app.data.repository
 import android.content.Context
 import android.os.Build
 import com.devicemonitor.app.BuildConfig
+import com.devicemonitor.app.data.api.DeviceRegisterRequest
 import com.devicemonitor.app.data.api.LocationRequest
 import com.devicemonitor.app.data.api.RetrofitClient
 import com.devicemonitor.app.data.db.AppDatabase
@@ -78,15 +79,30 @@ class DeviceRepository(private val context: Context) {
     }
 
     suspend fun registerDevice(): Result<String> {
+        val request = DeviceRegisterRequest(
+            deviceId = getDeviceId(),
+            deviceName = Build.MODEL,
+            androidVersion = Build.VERSION.RELEASE,
+            manufacturer = Build.MANUFACTURER,
+            model = Build.MODEL,
+            appVersion = BuildConfig.VERSION_NAME,
+            updateIntervalSeconds = getUpdateInterval()
+        )
+
         return try {
+            val restResponse = api.registerDevice(request)
+            if (restResponse.isSuccessful) {
+                return Result.success(restResponse.body()?.message ?: "Device registered")
+            }
+
             val payload = JSONObject()
-                .put("deviceId", getDeviceId())
-                .put("deviceName", Build.MODEL)
-                .put("androidVersion", Build.VERSION.RELEASE)
-                .put("manufacturer", Build.MANUFACTURER)
-                .put("model", Build.MODEL)
-                .put("appVersion", BuildConfig.VERSION_NAME)
-                .put("updateIntervalSeconds", getUpdateInterval())
+                .put("deviceId", request.deviceId)
+                .put("deviceName", request.deviceName)
+                .put("androidVersion", request.androidVersion)
+                .put("manufacturer", request.manufacturer)
+                .put("model", request.model)
+                .put("appVersion", request.appVersion)
+                .put("updateIntervalSeconds", request.updateIntervalSeconds)
 
             val response = socketManager.emitAck("device:register", payload)
             if (!response.optBoolean("ok", false)) {
@@ -114,8 +130,8 @@ class DeviceRepository(private val context: Context) {
     private suspend fun sendLocationWithRetry(request: LocationRequest, maxRetries: Int = 3): Boolean {
         var attempt = 0
         while (attempt < maxRetries) {
-            if (sendLocationViaSocket(request)) return true
             if (sendLocationViaRest(request)) return true
+            if (sendLocationViaSocket(request)) return true
             attempt++
             kotlinx.coroutines.delay(1000L * attempt)
         }
@@ -208,8 +224,8 @@ class DeviceRepository(private val context: Context) {
             .put("wifiAvailable", info.wifiAvailable)
             .put("mobileDataAvailable", info.mobileDataAvailable)
 
-        if (sendStatusViaSocket(payload)) return true
-        return sendStatusViaRest(isOnline, info)
+        if (sendStatusViaRest(isOnline, info)) return true
+        return sendStatusViaSocket(payload)
     }
 
     private suspend fun sendStatusViaSocket(payload: JSONObject): Boolean {
@@ -251,8 +267,8 @@ class DeviceRepository(private val context: Context) {
         info.temperature?.let { payload.put("batteryTemperature", it) }
         info.health?.let { payload.put("batteryHealth", it) }
 
-        if (sendBatteryViaSocket(payload)) return true
-        return sendBatteryViaRest(info)
+        if (sendBatteryViaRest(info)) return true
+        return sendBatteryViaSocket(payload)
     }
 
     private suspend fun sendBatteryViaSocket(payload: JSONObject): Boolean {

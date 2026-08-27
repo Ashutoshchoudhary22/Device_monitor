@@ -15,6 +15,11 @@
     <string name="permission_location_rationale">Location permission is required to track your device position.</string>
     <string name="permission_background_rationale">Background location is required for continuous tracking when the app is not open.</string>
     <string name="permission_denied">Permission denied. Tracking cannot start.</string>
+    <string name="battery_optimization_rationale">Disable battery optimization for this app so location tracking continues when the app is closed.</string>
+    <string name="miui_setup_title">Xiaomi / MIUI Setup</string>
+    <string name="miui_setup_message">On Xiaomi phones, enable Autostart and set Battery to No restrictions for background tracking to work.</string>
+    <string name="miui_autostart">Open Autostart</string>
+    <string name="miui_skip">Skip</string>
     <string name="open_settings">Open Settings</string>
     <string name="call_log_disabled">Call history is not available. Google Play and Android restrict call log access for most apps. This feature is intentionally disabled.</string>
     <string name="whatsapp_disabled">WhatsApp message reading is not supported. Private message databases cannot be accessed per Android security policy.</string>

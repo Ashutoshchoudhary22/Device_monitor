@@ -115,13 +115,6 @@ class LocationForegroundService : Service() {
         acquireWakeLock()
         updateNotification()
 
-        repository.connectSocket {
-            serviceScope.launch {
-                repository.sendStatus(true)
-                repository.sendBattery()
-            }
-        }
-
         startLocationThread()
         startLocationUpdates()
         fetchImmediateLocation()
@@ -237,18 +230,10 @@ class LocationForegroundService : Service() {
         statusJob = serviceScope.launch {
             while (isActive) {
                 acquireWakeLock()
-                if (!repository.isSocketConnected()) {
-                    repository.connectSocket {
-                        launch {
-                            repository.sendStatus(true)
-                            repository.sendBattery()
-                        }
-                    }
-                } else {
-                    repository.sendStatus(true)
-                    repository.sendBattery()
-                }
+                repository.sendStatus(true)
+                repository.sendBattery()
                 repository.syncQueuedLocations()
+                fetchImmediateLocation()
                 delay(30_000)
             }
         }
@@ -303,7 +288,7 @@ class LocationForegroundService : Service() {
         val channel = NotificationChannel(
             CHANNEL_ID,
             getString(R.string.location_notification_title),
-            NotificationManager.IMPORTANCE_DEFAULT
+            NotificationManager.IMPORTANCE_HIGH
         ).apply {
             description = getString(R.string.location_notification_text)
             setShowBadge(true)
@@ -346,7 +331,7 @@ class LocationForegroundService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     companion object {
-        const val CHANNEL_ID = "location_tracking_v3"
+        const val CHANNEL_ID = "location_tracking_v4"
         private const val CHANNEL_ID_LEGACY = "location_tracking"
         const val NOTIFICATION_ID = 1001
         const val ACTION_STOP = "com.devicemonitor.app.ACTION_STOP_TRACKING"
