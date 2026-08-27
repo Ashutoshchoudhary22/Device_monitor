@@ -91,12 +91,12 @@ async function registerDevice(userId, data) {
 }
 
 async function getDevices(userId) {
-  const devices = await Device.find({ userId }).sort({ lastSeen: -1 });
+  const devices = await Device.find({ userId }).sort({ lastSeen: -1 }).lean();
   return { devices };
 }
 
 async function getDevice(userId, deviceId) {
-  const device = await Device.findOne({ deviceId, userId });
+  const device = await Device.findOne({ deviceId, userId }).lean();
   if (!device) {
     const error = new Error('Device not found');
     error.status = 404;
@@ -198,7 +198,7 @@ async function getLocationHistory(userId, deviceId, query = {}) {
   const skip = (pageNum - 1) * limitNum;
 
   const [locations, total] = await Promise.all([
-    Location.find(dbQuery).sort({ timestamp: 1 }).skip(skip).limit(limitNum),
+    Location.find(dbQuery).sort({ timestamp: 1 }).skip(skip).limit(limitNum).lean(),
     Location.countDocuments(dbQuery),
   ]);
 

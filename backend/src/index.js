@@ -17,7 +17,7 @@ app.set('trust proxy', 1);
 
 const io = new Server(server, {
   cors: {
-    origin: config.corsOrigin,
+    origin: config.corsOrigins,
     methods: ['GET', 'POST'],
     credentials: true,
   },
@@ -29,7 +29,7 @@ setupSocket(io);
 app.use(helmet());
 app.use(
   cors({
-    origin: config.corsOrigin,
+    origin: config.corsOrigins,
     credentials: true,
   })
 );

@@ -52,16 +52,13 @@ function connect(): Socket | null {
 }
 
 function connectGuest(): Socket {
-  if (socket?.connected) {
-    return socket;
-  }
-
   if (socket) {
     socket.disconnect();
+    socket = null;
+    connectPromise = null;
   }
 
   socket = createSocket(null);
-  connectPromise = null;
   return socket;
 }
 
@@ -106,7 +103,11 @@ export async function socketRequest<T extends SocketAck>(
   const connected = await waitForConnection(s);
 
   return new Promise((resolve, reject) => {
-    connected.timeout(15000).emit(event, data ?? {}, (response: T) => {
+    connected.timeout(15000).emit(event, data ?? {}, (err: Error | null, response: T) => {
+      if (err) {
+        reject(new Error(err.message || 'Socket request timed out'));
+        return;
+      }
       if (response?.ok) {
         resolve(response);
       } else {
