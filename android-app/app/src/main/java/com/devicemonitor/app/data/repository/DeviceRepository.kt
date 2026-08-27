@@ -4,6 +4,7 @@ import android.content.Context
 import android.os.Build
 import com.devicemonitor.app.BuildConfig
 import com.devicemonitor.app.data.api.LocationRequest
+import com.devicemonitor.app.data.api.RetrofitClient
 import com.devicemonitor.app.data.db.AppDatabase
 import com.devicemonitor.app.data.db.LocationQueueEntity
 import com.devicemonitor.app.data.prefs.TokenManager
@@ -17,6 +18,7 @@ import java.time.Instant
 class DeviceRepository(private val context: Context) {
     private val tokenManager = TokenManager(context)
     private val socketManager = SocketManager(tokenManager)
+    private val api = RetrofitClient.create(tokenManager)
     private val deviceIdManager = DeviceIdManager(context)
     private val db = AppDatabase.getInstance(context)
     private val queueDao = db.locationQueueDao()
@@ -112,33 +114,51 @@ class DeviceRepository(private val context: Context) {
     private suspend fun sendLocationWithRetry(request: LocationRequest, maxRetries: Int = 3): Boolean {
         var attempt = 0
         while (attempt < maxRetries) {
-            try {
-                val payload = JSONObject()
-                    .put("deviceId", getDeviceId())
-                    .put("latitude", request.latitude)
-                    .put("longitude", request.longitude)
-                    .put("timestamp", request.timestamp)
-
-                request.accuracy?.let { payload.put("accuracy", it) }
-                request.altitude?.let { payload.put("altitude", it) }
-                request.speed?.let { payload.put("speed", it) }
-
-                val response = socketManager.emitAck("device:location", payload)
-                if (response.optBoolean("ok", false)) return true
-
-                val error = response.optString("error", "")
-                if (error.contains("401") || error.contains("Authentication")) {
-                    tokenManager.clearToken()
-                    return false
-                }
-            } catch (_: Exception) {
-                // retry
-            }
+            if (sendLocationViaSocket(request)) return true
+            if (sendLocationViaRest(request)) return true
             attempt++
             kotlinx.coroutines.delay(1000L * attempt)
         }
         queueLocation(request)
         return false
+    }
+
+    private suspend fun sendLocationViaSocket(request: LocationRequest): Boolean {
+        return try {
+            val payload = JSONObject()
+                .put("deviceId", getDeviceId())
+                .put("latitude", request.latitude)
+                .put("longitude", request.longitude)
+                .put("timestamp", request.timestamp)
+
+            request.accuracy?.let { payload.put("accuracy", it) }
+            request.altitude?.let { payload.put("altitude", it) }
+            request.speed?.let { payload.put("speed", it) }
+
+            val response = socketManager.emitAck("device:location", payload)
+            if (response.optBoolean("ok", false)) return true
+
+            val error = response.optString("error", "")
+            if (error.contains("401") || error.contains("Authentication")) {
+                tokenManager.clearToken()
+            }
+            false
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private suspend fun sendLocationViaRest(request: LocationRequest): Boolean {
+        return try {
+            val response = api.postLocation(getDeviceId(), request)
+            if (response.isSuccessful) return true
+            if (response.code() == 401) {
+                tokenManager.clearToken()
+            }
+            false
+        } catch (_: Exception) {
+            false
+        }
     }
 
     private suspend fun queueLocation(request: LocationRequest) {
@@ -181,14 +201,19 @@ class DeviceRepository(private val context: Context) {
 
     suspend fun sendStatus(isOnline: Boolean): Boolean {
         val info = networkMonitor.getNetworkInfo()
-        return try {
-            val payload = JSONObject()
-                .put("deviceId", getDeviceId())
-                .put("isOnline", isOnline)
-                .put("networkType", info.networkType)
-                .put("wifiAvailable", info.wifiAvailable)
-                .put("mobileDataAvailable", info.mobileDataAvailable)
+        val payload = JSONObject()
+            .put("deviceId", getDeviceId())
+            .put("isOnline", isOnline)
+            .put("networkType", info.networkType)
+            .put("wifiAvailable", info.wifiAvailable)
+            .put("mobileDataAvailable", info.mobileDataAvailable)
 
+        if (sendStatusViaSocket(payload)) return true
+        return sendStatusViaRest(isOnline, info)
+    }
+
+    private suspend fun sendStatusViaSocket(payload: JSONObject): Boolean {
+        return try {
             val response = socketManager.emitAck("device:status", payload)
             response.optBoolean("ok", false)
         } catch (_: Exception) {
@@ -196,19 +221,61 @@ class DeviceRepository(private val context: Context) {
         }
     }
 
+    private suspend fun sendStatusViaRest(
+        isOnline: Boolean,
+        info: com.devicemonitor.app.util.NetworkMonitor.NetworkInfo
+    ): Boolean {
+        return try {
+            val response = api.postStatus(
+                getDeviceId(),
+                com.devicemonitor.app.data.api.StatusRequest(
+                    isOnline = isOnline,
+                    networkType = info.networkType,
+                    wifiAvailable = info.wifiAvailable,
+                    mobileDataAvailable = info.mobileDataAvailable
+                )
+            )
+            response.isSuccessful
+        } catch (_: Exception) {
+            false
+        }
+    }
+
     suspend fun sendBattery(): Boolean {
         val info = batteryMonitor.getBatteryInfo()
+        val payload = JSONObject()
+            .put("deviceId", getDeviceId())
+            .put("batteryPercentage", info.percentage)
+            .put("isCharging", info.isCharging)
+
+        info.temperature?.let { payload.put("batteryTemperature", it) }
+        info.health?.let { payload.put("batteryHealth", it) }
+
+        if (sendBatteryViaSocket(payload)) return true
+        return sendBatteryViaRest(info)
+    }
+
+    private suspend fun sendBatteryViaSocket(payload: JSONObject): Boolean {
         return try {
-            val payload = JSONObject()
-                .put("deviceId", getDeviceId())
-                .put("batteryPercentage", info.percentage)
-                .put("isCharging", info.isCharging)
-
-            info.temperature?.let { payload.put("batteryTemperature", it) }
-            info.health?.let { payload.put("batteryHealth", it) }
-
             val response = socketManager.emitAck("device:battery", payload)
             response.optBoolean("ok", false)
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private suspend fun sendBatteryViaRest(info: com.devicemonitor.app.util.BatteryMonitor.BatteryInfo): Boolean {
+        return try {
+            val response = api.postBattery(
+                getDeviceId(),
+                com.devicemonitor.app.data.api.BatteryRequest(
+                    batteryPercentage = info.percentage,
+                    isCharging = info.isCharging,
+                    batteryTemperature = info.temperature,
+                    batteryHealth = info.health
+                )
+            )
+            response.isSuccessful
         } catch (_: Exception) {
             false
         }

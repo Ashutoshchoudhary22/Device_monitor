@@ -9,6 +9,7 @@ const config = require('./config');
 const apiRoutes = require('./routes');
 const errorHandler = require('./middleware/errorHandler');
 const { setupSocket } = require('./socket');
+const { markStaleDevicesOffline } = require('./services/deviceEvents');
 
 const app = express();
 const server = http.createServer(app);
@@ -58,6 +59,11 @@ async function start() {
 
     server.listen(config.port, () => {
       console.log(`Server running on port ${config.port}`);
+
+      markStaleDevicesOffline(io).catch(console.error);
+      setInterval(() => {
+        markStaleDevicesOffline(io).catch(console.error);
+      }, config.deviceStaleCheckIntervalMs);
     });
   } catch (err) {
     console.error('Failed to start server:', err);

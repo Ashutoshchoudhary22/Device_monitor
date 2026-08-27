@@ -23,4 +23,7 @@ module.exports = {
   },
   otpExpiryMinutes: parseInt(process.env.OTP_EXPIRY_MINUTES || '10', 10),
   otpMaxAttempts: parseInt(process.env.OTP_MAX_ATTEMPTS || '5', 10),
+  // Mark device offline if no heartbeat/location update within this window
+  deviceOfflineTimeoutMs: parseInt(process.env.DEVICE_OFFLINE_TIMEOUT_MS || '120000', 10),
+  deviceStaleCheckIntervalMs: parseInt(process.env.DEVICE_STALE_CHECK_INTERVAL_MS || '60000', 10),
 };

@@ -36,6 +36,24 @@ function emitToUser(io, userId, event, payload) {
   }
 }
 
+function getOfflineCutoffMs(device) {
+  const intervalSec = device.updateIntervalSeconds || 15;
+  return Math.max(config.deviceOfflineTimeoutMs, intervalSec * 3 * 1000);
+}
+
+function isDeviceEffectivelyOnline(device) {
+  if (!device.isOnline) return false;
+  if (!device.lastSeen) return false;
+  const cutoff = Date.now() - getOfflineCutoffMs(device);
+  return new Date(device.lastSeen).getTime() >= cutoff;
+}
+
+function applyEffectiveOnlineStatus(device) {
+  const effectiveOnline = isDeviceEffectivelyOnline(device);
+  if (effectiveOnline === device.isOnline) return device;
+  return { ...device, isOnline: effectiveOnline };
+}
+
 async function registerDevice(userId, data) {
   const {
     deviceId,
@@ -93,7 +111,7 @@ async function registerDevice(userId, data) {
 
 async function getDevices(userId) {
   const devices = await Device.find({ userId }).sort({ lastSeen: -1 }).lean();
-  return { devices };
+  return { devices: devices.map(applyEffectiveOnlineStatus) };
 }
 
 async function getDevice(userId, deviceId) {
@@ -103,7 +121,32 @@ async function getDevice(userId, deviceId) {
     error.status = 404;
     throw error;
   }
-  return { device };
+  return { device: applyEffectiveOnlineStatus(device) };
+}
+
+async function markStaleDevicesOffline(io) {
+  const onlineDevices = await Device.find({ isOnline: true });
+  const now = Date.now();
+
+  for (const device of onlineDevices) {
+    const cutoffMs = getOfflineCutoffMs(device);
+    if (now - new Date(device.lastSeen).getTime() <= cutoffMs) continue;
+
+    device.isOnline = false;
+    await device.save();
+
+    const payload = {
+      deviceId: device.deviceId,
+      isOnline: false,
+      networkType: device.networkType,
+      wifiAvailable: device.wifiAvailable,
+      mobileDataAvailable: device.mobileDataAvailable,
+      lastSeen: device.lastSeen,
+    };
+
+    emitToUser(io, device.userId, 'device:offline', payload);
+    emitToUser(io, device.userId, 'device:status', payload);
+  }
 }
 
 async function recordLocation(userId, deviceId, data, io) {
@@ -314,4 +357,6 @@ module.exports = {
   getLocationHistory,
   recordStatus,
   recordBattery,
+  markStaleDevicesOffline,
+  isDeviceEffectivelyOnline,
 };
