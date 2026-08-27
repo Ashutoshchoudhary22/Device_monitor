@@ -10,13 +10,14 @@ module.exports = {
       max_memory_restart: '300M',
       env: {
         NODE_ENV: 'production',
+        PORT: 3011,
       },
     },
     {
       name: 'device-monitor-dashboard',
       cwd: './dashboard',
       script: 'node_modules/next/dist/bin/next',
-      args: 'start -p 3000',
+      args: 'start -p 3010',
       instances: 1,
       autorestart: true,
       watch: false,

@@ -51,10 +51,9 @@ echo "==> Installing Node packages..."
 cd backend && npm ci --omit=dev && cd ..
 cd dashboard && npm ci && npm run build && cd ..
 
-echo "==> Configuring nginx..."
+echo "==> Configuring nginx (only device.faltu.shop — other sites untouched)..."
 cp deploy/nginx/device.faltu.shop.conf /etc/nginx/sites-available/device.faltu.shop
 ln -sf /etc/nginx/sites-available/device.faltu.shop /etc/nginx/sites-enabled/device.faltu.shop
-rm -f /etc/nginx/sites-enabled/default
 
 if [[ ! -f /etc/letsencrypt/live/$DOMAIN/fullchain.pem ]]; then
   echo "==> Obtaining SSL certificate..."
