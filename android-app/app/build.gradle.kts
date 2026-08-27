@@ -20,12 +20,13 @@ android {
 
     buildTypes {
         debug {
-            // Physical phone on same WiFi — use PC LAN IP (ipconfig)
             buildConfigField("String", "API_BASE_URL", "\"http://192.168.1.59:3001/api/\"")
+            buildConfigField("String", "SOCKET_URL", "\"http://192.168.1.59:3001\"")
         }
         release {
             isMinifyEnabled = false
             buildConfigField("String", "API_BASE_URL", "\"https://device.faltu.shop/api/\"")
+            buildConfigField("String", "SOCKET_URL", "\"https://device.faltu.shop\"")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
@@ -66,6 +67,10 @@ dependencies {
     implementation("com.squareup.retrofit2:converter-gson:2.11.0")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("com.squareup.okhttp3:logging-interceptor:4.12.0")
+
+    implementation("io.socket:socket.io-client:2.1.1") {
+        exclude(group = "org.json", module = "json")
+    }
 
     implementation("androidx.work:work-runtime-ktx:2.9.1")
     implementation("androidx.security:security-crypto:1.1.0-alpha06")

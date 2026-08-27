@@ -42,6 +42,7 @@ class MainActivity : AppCompatActivity() {
         setupUi()
         registerDevice()
         scheduleSyncWorker()
+        ensureTrackingActive()
         updateStatusUi()
     }
 
@@ -59,7 +60,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         binding.toggleTrackingButton.setOnClickListener {
-            if (LocationForegroundService.isRunning(this)) {
+            if (LocationForegroundService.isTrackingEnabled(this)) {
                 LocationForegroundService.stop(this)
                 updateStatusUi()
             } else {
@@ -69,6 +70,7 @@ class MainActivity : AppCompatActivity() {
 
         binding.logoutButton.setOnClickListener {
             LocationForegroundService.stop(this)
+            repository.disconnectSocket()
             repository.clearAuth()
             startActivity(Intent(this, LoginActivity::class.java))
             finish()
@@ -126,6 +128,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         LocationForegroundService.start(this)
+        PermissionHelper.requestIgnoreBatteryOptimizations(this)
         updateStatusUi()
     }
 
@@ -166,14 +169,25 @@ class MainActivity : AppCompatActivity() {
         binding.openSettingsButton.visibility = View.VISIBLE
     }
 
+    private fun ensureTrackingActive() {
+        if (!LocationForegroundService.isTrackingEnabled(this)) return
+        if (!PermissionHelper.hasLocationPermissions(this)) return
+        if (!PermissionHelper.hasBackgroundLocation(this)) return
+        if (LocationForegroundService.isRunning(this)) return
+
+        LocationForegroundService.start(this)
+    }
+
     private fun updateStatusUi() {
-        val tracking = LocationForegroundService.isRunning(this)
-        binding.trackingStatusText.text = if (tracking) {
-            getString(com.devicemonitor.app.R.string.tracking_active)
-        } else {
-            getString(com.devicemonitor.app.R.string.tracking_stopped)
+        val trackingEnabled = LocationForegroundService.isTrackingEnabled(this)
+        val serviceRunning = LocationForegroundService.isRunning(this)
+
+        binding.trackingStatusText.text = when {
+            trackingEnabled && serviceRunning -> getString(com.devicemonitor.app.R.string.tracking_active)
+            trackingEnabled -> "Tracking enabled — restarting..."
+            else -> getString(com.devicemonitor.app.R.string.tracking_stopped)
         }
-        binding.toggleTrackingButton.text = if (tracking) {
+        binding.toggleTrackingButton.text = if (trackingEnabled) {
             getString(com.devicemonitor.app.R.string.stop_tracking)
         } else {
             getString(com.devicemonitor.app.R.string.start_tracking)
@@ -192,6 +206,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        ensureTrackingActive()
         updateStatusUi()
     }
 }

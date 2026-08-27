@@ -68,60 +68,69 @@ export function setUser(user: User) {
   localStorage.setItem('user', JSON.stringify(user));
 }
 
-async function apiRequest<T>(path: string, options: RequestInit = {}): Promise<T> {
-  const token = getToken();
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    ...(options.headers as Record<string, string>),
-  };
-  if (token) headers.Authorization = `Bearer ${token}`;
-
-  const res = await fetch(`${API_URL}${path}`, { ...options, headers });
-  const data = await res.json().catch(() => ({}));
-
-  if (!res.ok) {
-    throw new Error(data.error || `Request failed (${res.status})`);
-  }
-  return data as T;
-}
+import { socketRequest } from './socketManager';
 
 export const api = {
-  login: (email: string, password: string) =>
-    apiRequest<{ token: string; user: User }>('/auth/login', {
-      method: 'POST',
-      body: JSON.stringify({ email, password }),
-    }),
+  login: async (email: string, password: string) => {
+    const data = await socketRequest<{
+      ok: boolean;
+      token: string;
+      user: User;
+    }>('auth:login', { email, password }, { guest: true });
+    return { token: data.token, user: data.user };
+  },
 
-  register: (email: string, password: string, name: string) =>
-    apiRequest<{ message: string; email: string }>('/auth/register', {
-      method: 'POST',
-      body: JSON.stringify({ email, password, name }),
-    }),
+  register: async (email: string, password: string, name: string) => {
+    const data = await socketRequest<{
+      ok: boolean;
+      message: string;
+      email: string;
+    }>('auth:register', { email, password, name }, { guest: true });
+    return { message: data.message, email: data.email };
+  },
 
-  verifyOtp: (email: string, otp: string) =>
-    apiRequest<{ token: string; user: User; message: string }>('/auth/verify-otp', {
-      method: 'POST',
-      body: JSON.stringify({ email, otp }),
-    }),
+  verifyOtp: async (email: string, otp: string) => {
+    const data = await socketRequest<{
+      ok: boolean;
+      token: string;
+      user: User;
+      message: string;
+    }>('auth:verify-otp', { email, otp }, { guest: true });
+    return { token: data.token, user: data.user, message: data.message };
+  },
 
-  resendOtp: (email: string) =>
-    apiRequest<{ message: string; email: string }>('/auth/resend-otp', {
-      method: 'POST',
-      body: JSON.stringify({ email }),
-    }),
+  resendOtp: async (email: string) => {
+    const data = await socketRequest<{
+      ok: boolean;
+      message: string;
+      email: string;
+    }>('auth:resend-otp', { email }, { guest: true });
+    return { message: data.message, email: data.email };
+  },
 
-  getDevices: () => apiRequest<{ devices: Device[] }>('/devices'),
+  getDevices: async () => {
+    const data = await socketRequest<{ ok: boolean; devices: Device[] }>('dashboard:getDevices');
+    return { devices: data.devices };
+  },
 
-  getDevice: (deviceId: string) =>
-    apiRequest<{ device: Device }>(`/devices/${deviceId}`),
+  getDevice: async (deviceId: string) => {
+    const data = await socketRequest<{ ok: boolean; device: Device }>('dashboard:getDevice', {
+      deviceId,
+    });
+    return { device: data.device };
+  },
 
-  getLocationHistory: (deviceId: string, date?: string, page = 1) => {
-    const params = new URLSearchParams({ page: String(page) });
-    if (date) params.set('date', date);
-    return apiRequest<{
+  getLocationHistory: async (deviceId: string, date?: string, page = 1) => {
+    const data = await socketRequest<{
+      ok: boolean;
       locations: LocationPoint[];
       pagination: { page: number; limit: number; total: number; pages: number };
       summary: { pointCount: number; startTime: string | null; endTime: string | null };
-    }>(`/devices/${deviceId}/location/history?${params}`);
+    }>('dashboard:getLocationHistory', { deviceId, date, page });
+    return {
+      locations: data.locations,
+      pagination: data.pagination,
+      summary: data.summary,
+    };
   },
 };

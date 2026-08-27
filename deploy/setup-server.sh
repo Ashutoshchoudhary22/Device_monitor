@@ -52,12 +52,22 @@ cd backend && npm ci --omit=dev && cd ..
 cd dashboard && npm ci && npm run build && cd ..
 
 echo "==> Configuring nginx (only device.faltu.shop — other sites untouched)..."
-cp deploy/nginx/device.faltu.shop.conf /etc/nginx/sites-available/device.faltu.shop
 ln -sf /etc/nginx/sites-available/device.faltu.shop /etc/nginx/sites-enabled/device.faltu.shop
 
 if [[ ! -f /etc/letsencrypt/live/$DOMAIN/fullchain.pem ]]; then
+  echo "==> SSL cert missing — using HTTP config first..."
+  cp deploy/nginx/device.faltu.shop.init.conf /etc/nginx/sites-available/device.faltu.shop
+  nginx -t
+  systemctl reload nginx
+
   echo "==> Obtaining SSL certificate..."
-  certbot certonly --nginx -d "$DOMAIN" --non-interactive --agree-tos -m "${CERTBOT_EMAIL:-admin@faltu.shop}" || true
+  certbot certonly --webroot -w /var/www/html -d "$DOMAIN" \
+    --non-interactive --agree-tos -m "${CERTBOT_EMAIL:-admin@faltu.shop}"
+
+  echo "==> Enabling HTTPS config..."
+  cp deploy/nginx/device.faltu.shop.conf /etc/nginx/sites-available/device.faltu.shop
+else
+  cp deploy/nginx/device.faltu.shop.conf /etc/nginx/sites-available/device.faltu.shop
 fi
 
 nginx -t

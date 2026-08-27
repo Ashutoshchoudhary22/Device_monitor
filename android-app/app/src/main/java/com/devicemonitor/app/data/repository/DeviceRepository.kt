@@ -3,19 +3,20 @@ package com.devicemonitor.app.data.repository
 import android.content.Context
 import android.os.Build
 import com.devicemonitor.app.BuildConfig
-import com.devicemonitor.app.data.api.*
+import com.devicemonitor.app.data.api.LocationRequest
 import com.devicemonitor.app.data.db.AppDatabase
 import com.devicemonitor.app.data.db.LocationQueueEntity
 import com.devicemonitor.app.data.prefs.TokenManager
+import com.devicemonitor.app.data.socket.SocketManager
 import com.devicemonitor.app.util.BatteryMonitor
 import com.devicemonitor.app.util.DeviceIdManager
 import com.devicemonitor.app.util.NetworkMonitor
-import kotlinx.coroutines.delay
+import org.json.JSONObject
 import java.time.Instant
 
 class DeviceRepository(private val context: Context) {
     private val tokenManager = TokenManager(context)
-    private val api = RetrofitClient.create(tokenManager)
+    private val socketManager = SocketManager(tokenManager)
     private val deviceIdManager = DeviceIdManager(context)
     private val db = AppDatabase.getInstance(context)
     private val queueDao = db.locationQueueDao()
@@ -23,42 +24,74 @@ class DeviceRepository(private val context: Context) {
     private val networkMonitor = NetworkMonitor(context)
 
     fun getToken(): String? = tokenManager.getToken()
-    fun clearAuth() = tokenManager.clearToken()
+    fun clearAuth() {
+        socketManager.disconnect()
+        tokenManager.clearToken()
+    }
+
     fun getDeviceId(): String = deviceIdManager.getDeviceId()
     fun getUpdateInterval(): Int = tokenManager.getUpdateInterval()
     fun setUpdateInterval(seconds: Int) = tokenManager.saveUpdateInterval(seconds)
 
-    suspend fun login(email: String, password: String): Result<AuthResponse> {
+    fun connectSocket() {
+        if (tokenManager.getToken() != null) {
+            socketManager.connect()
+        }
+    }
+
+    fun disconnectSocket() {
+        socketManager.disconnect()
+    }
+
+    fun isSocketConnected(): Boolean = socketManager.isConnected()
+
+    suspend fun login(email: String, password: String): Result<LoginResult> {
         return try {
-            val response = api.login(LoginRequest(email, password))
-            if (response.isSuccessful && response.body() != null) {
-                tokenManager.saveToken(response.body()!!.token)
-                Result.success(response.body()!!)
-            } else {
-                Result.failure(Exception(response.errorBody()?.string() ?: "Login failed"))
+            val payload = JSONObject()
+                .put("email", email)
+                .put("password", password)
+
+            val response = socketManager.emitAck("auth:login", payload, guest = true)
+            if (!response.optBoolean("ok", false)) {
+                return Result.failure(Exception(response.optString("error", "Login failed")))
             }
+
+            val token = response.getString("token")
+            tokenManager.saveToken(token)
+            socketManager.disconnect()
+            socketManager.connect()
+
+            val userObj = response.getJSONObject("user")
+            Result.success(
+                LoginResult(
+                    token = token,
+                    userId = userObj.getString("id"),
+                    email = userObj.getString("email"),
+                    name = userObj.getString("name")
+                )
+            )
         } catch (e: Exception) {
             Result.failure(e)
         }
     }
 
-    suspend fun registerDevice(): Result<DeviceResponse> {
+    suspend fun registerDevice(): Result<String> {
         return try {
-            val request = DeviceRegisterRequest(
-                deviceId = getDeviceId(),
-                deviceName = Build.MODEL,
-                androidVersion = Build.VERSION.RELEASE,
-                manufacturer = Build.MANUFACTURER,
-                model = Build.MODEL,
-                appVersion = BuildConfig.VERSION_NAME,
-                updateIntervalSeconds = getUpdateInterval()
-            )
-            val response = api.registerDevice(request)
-            if (response.isSuccessful && response.body() != null) {
-                Result.success(response.body()!!)
-            } else {
-                Result.failure(Exception(response.errorBody()?.string() ?: "Registration failed"))
+            val payload = JSONObject()
+                .put("deviceId", getDeviceId())
+                .put("deviceName", Build.MODEL)
+                .put("androidVersion", Build.VERSION.RELEASE)
+                .put("manufacturer", Build.MANUFACTURER)
+                .put("model", Build.MODEL)
+                .put("appVersion", BuildConfig.VERSION_NAME)
+                .put("updateIntervalSeconds", getUpdateInterval())
+
+            val response = socketManager.emitAck("device:register", payload)
+            if (!response.optBoolean("ok", false)) {
+                return Result.failure(Exception(response.optString("error", "Registration failed")))
             }
+
+            Result.success(response.optString("message", "Device registered"))
         } catch (e: Exception) {
             Result.failure(e)
         }
@@ -78,12 +111,23 @@ class DeviceRepository(private val context: Context) {
 
     private suspend fun sendLocationWithRetry(request: LocationRequest, maxRetries: Int = 3): Boolean {
         var attempt = 0
-        var delayMs = 1000L
         while (attempt < maxRetries) {
             try {
-                val response = api.postLocation(getDeviceId(), request)
-                if (response.isSuccessful) return true
-                if (response.code() == 401) {
+                val payload = JSONObject()
+                    .put("deviceId", getDeviceId())
+                    .put("latitude", request.latitude)
+                    .put("longitude", request.longitude)
+                    .put("timestamp", request.timestamp)
+
+                request.accuracy?.let { payload.put("accuracy", it) }
+                request.altitude?.let { payload.put("altitude", it) }
+                request.speed?.let { payload.put("speed", it) }
+
+                val response = socketManager.emitAck("device:location", payload)
+                if (response.optBoolean("ok", false)) return true
+
+                val error = response.optString("error", "")
+                if (error.contains("401") || error.contains("Authentication")) {
                     tokenManager.clearToken()
                     return false
                 }
@@ -91,8 +135,7 @@ class DeviceRepository(private val context: Context) {
                 // retry
             }
             attempt++
-            delay(delayMs)
-            delayMs *= 2
+            kotlinx.coroutines.delay(1000L * attempt)
         }
         queueLocation(request)
         return false
@@ -123,22 +166,14 @@ class DeviceRepository(private val context: Context) {
                 item.speed,
                 item.timestamp
             )
-            try {
-                val response = api.postLocation(getDeviceId(), request)
-                if (response.isSuccessful) {
-                    queueDao.deleteById(item.id)
-                    synced++
-                } else if (item.retryCount >= 5) {
-                    queueDao.deleteById(item.id)
-                } else {
-                    queueDao.incrementRetry(item.id)
-                }
-            } catch (_: Exception) {
-                if (item.retryCount >= 5) {
-                    queueDao.deleteById(item.id)
-                } else {
-                    queueDao.incrementRetry(item.id)
-                }
+            val success = sendLocationWithRetry(request, maxRetries = 1)
+            if (success) {
+                queueDao.deleteById(item.id)
+                synced++
+            } else if (item.retryCount >= 5) {
+                queueDao.deleteById(item.id)
+            } else {
+                queueDao.incrementRetry(item.id)
             }
         }
         return synced
@@ -147,16 +182,15 @@ class DeviceRepository(private val context: Context) {
     suspend fun sendStatus(isOnline: Boolean): Boolean {
         val info = networkMonitor.getNetworkInfo()
         return try {
-            val response = api.postStatus(
-                getDeviceId(),
-                StatusRequest(
-                    isOnline = isOnline,
-                    networkType = info.networkType,
-                    wifiAvailable = info.wifiAvailable,
-                    mobileDataAvailable = info.mobileDataAvailable
-                )
-            )
-            response.isSuccessful
+            val payload = JSONObject()
+                .put("deviceId", getDeviceId())
+                .put("isOnline", isOnline)
+                .put("networkType", info.networkType)
+                .put("wifiAvailable", info.wifiAvailable)
+                .put("mobileDataAvailable", info.mobileDataAvailable)
+
+            val response = socketManager.emitAck("device:status", payload)
+            response.optBoolean("ok", false)
         } catch (_: Exception) {
             false
         }
@@ -165,20 +199,27 @@ class DeviceRepository(private val context: Context) {
     suspend fun sendBattery(): Boolean {
         val info = batteryMonitor.getBatteryInfo()
         return try {
-            val response = api.postBattery(
-                getDeviceId(),
-                BatteryRequest(
-                    batteryPercentage = info.percentage,
-                    isCharging = info.isCharging,
-                    batteryTemperature = info.temperature,
-                    batteryHealth = info.health
-                )
-            )
-            response.isSuccessful
+            val payload = JSONObject()
+                .put("deviceId", getDeviceId())
+                .put("batteryPercentage", info.percentage)
+                .put("isCharging", info.isCharging)
+
+            info.temperature?.let { payload.put("batteryTemperature", it) }
+            info.health?.let { payload.put("batteryHealth", it) }
+
+            val response = socketManager.emitAck("device:battery", payload)
+            response.optBoolean("ok", false)
         } catch (_: Exception) {
             false
         }
     }
 
     fun createLocationTimestamp(): String = Instant.now().toString()
+
+    data class LoginResult(
+        val token: String,
+        val userId: String,
+        val email: String,
+        val name: String
+    )
 }

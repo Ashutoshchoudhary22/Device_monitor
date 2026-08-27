@@ -1,5 +1,6 @@
 package com.devicemonitor.app.service
 
+import android.app.AlarmManager
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -8,8 +9,10 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.location.Location
+import android.os.Build
 import android.os.IBinder
 import android.os.Looper
+import android.os.SystemClock
 import androidx.core.app.NotificationCompat
 import com.devicemonitor.app.R
 import com.devicemonitor.app.data.prefs.TokenManager
@@ -20,6 +23,7 @@ import com.google.android.gms.location.LocationRequest
 import com.google.android.gms.location.LocationResult
 import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
+import com.google.android.gms.tasks.CancellationTokenSource
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -49,7 +53,7 @@ class LocationForegroundService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_STOP -> {
-                stopTracking()
+                stopTracking(userInitiated = true)
                 return START_NOT_STICKY
             }
             else -> startTracking()
@@ -60,17 +64,23 @@ class LocationForegroundService : Service() {
     private fun startTracking() {
         tokenManager.setTrackingEnabled(true)
         startForeground(NOTIFICATION_ID, buildNotification())
+        repository.connectSocket()
         startLocationUpdates()
+        fetchImmediateLocation()
         startPeriodicStatusUpdates()
         serviceScope.launch {
+            repository.registerDevice()
             repository.sendStatus(true)
             repository.sendBattery()
             repository.syncQueuedLocations()
         }
     }
 
-    private fun stopTracking() {
-        tokenManager.setTrackingEnabled(false)
+    private fun stopTracking(userInitiated: Boolean) {
+        if (userInitiated) {
+            tokenManager.setTrackingEnabled(false)
+            repository.disconnectSocket()
+        }
         stopLocationUpdates()
         statusJob?.cancel()
         serviceScope.launch { repository.sendStatus(false) }
@@ -79,12 +89,13 @@ class LocationForegroundService : Service() {
     }
 
     private fun startLocationUpdates() {
-        val intervalSeconds = tokenManager.getUpdateInterval()
-        val intervalMs = (intervalSeconds * 1000).toLong()
+        val intervalSeconds = tokenManager.getUpdateInterval().coerceAtLeast(5)
+        val intervalMs = intervalSeconds * 1000L
 
-        val locationRequest = LocationRequest.Builder(Priority.PRIORITY_BALANCED_POWER_ACCURACY, intervalMs)
-            .setMinUpdateIntervalMillis(intervalMs)
+        val locationRequest = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, intervalMs)
+            .setMinUpdateIntervalMillis(intervalMs / 2)
             .setMaxUpdateDelayMillis(intervalMs * 2)
+            .setWaitForAccurateLocation(false)
             .build()
 
         locationCallback = object : LocationCallback() {
@@ -102,8 +113,31 @@ class LocationForegroundService : Service() {
                 locationCallback!!,
                 Looper.getMainLooper()
             )
-        } catch (e: SecurityException) {
-            stopTracking()
+        } catch (_: SecurityException) {
+            // Keep tracking preference — user can reopen app to grant permissions
+            stopTracking(userInitiated = false)
+        }
+    }
+
+    private fun fetchImmediateLocation() {
+        try {
+            fusedLocationClient.lastLocation.addOnSuccessListener { location ->
+                if (location != null) {
+                    handleLocation(location)
+                }
+            }
+
+            val cancellationToken = CancellationTokenSource()
+            fusedLocationClient.getCurrentLocation(
+                Priority.PRIORITY_HIGH_ACCURACY,
+                cancellationToken.token
+            ).addOnSuccessListener { location ->
+                if (location != null) {
+                    handleLocation(location)
+                }
+            }
+        } catch (_: SecurityException) {
+            // handled in startLocationUpdates
         }
     }
 
@@ -138,6 +172,55 @@ class LocationForegroundService : Service() {
                 delay(60_000)
             }
         }
+    }
+
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        super.onTaskRemoved(rootIntent)
+        if (!tokenManager.isTrackingEnabled()) return
+
+        val restartIntent = Intent(applicationContext, LocationForegroundService::class.java)
+        val pendingIntent = PendingIntent.getService(
+            applicationContext,
+            RESTART_REQUEST_CODE,
+            restartIntent,
+            PendingIntent.FLAG_ONE_SHOT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val alarmManager = getSystemService(Context.ALARM_SERVICE) as AlarmManager
+        alarmManager.setExactAndAllowWhileIdle(
+            AlarmManager.ELAPSED_REALTIME_WAKEUP,
+            SystemClock.elapsedRealtime() + 1_000,
+            pendingIntent
+        )
+    }
+
+    override fun onDestroy() {
+        statusJob?.cancel()
+        stopLocationUpdates()
+        serviceScope.cancel()
+
+        if (tokenManager.isTrackingEnabled()) {
+            scheduleRestart()
+        }
+
+        super.onDestroy()
+    }
+
+    private fun scheduleRestart() {
+        val restartIntent = Intent(applicationContext, LocationForegroundService::class.java)
+        val pendingIntent = PendingIntent.getService(
+            applicationContext,
+            RESTART_REQUEST_CODE + 1,
+            restartIntent,
+            PendingIntent.FLAG_ONE_SHOT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val alarmManager = getSystemService(Context.ALARM_SERVICE) as AlarmManager
+        alarmManager.setExactAndAllowWhileIdle(
+            AlarmManager.ELAPSED_REALTIME_WAKEUP,
+            SystemClock.elapsedRealtime() + 2_000,
+            pendingIntent
+        )
     }
 
     private fun createNotificationChannel() {
@@ -180,17 +263,11 @@ class LocationForegroundService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
-    override fun onDestroy() {
-        statusJob?.cancel()
-        stopLocationUpdates()
-        serviceScope.cancel()
-        super.onDestroy()
-    }
-
     companion object {
         const val CHANNEL_ID = "location_tracking"
         const val NOTIFICATION_ID = 1001
         const val ACTION_STOP = "com.devicemonitor.app.ACTION_STOP_TRACKING"
+        private const val RESTART_REQUEST_CODE = 2001
 
         fun start(context: Context) {
             val intent = Intent(context, LocationForegroundService::class.java)
@@ -204,8 +281,15 @@ class LocationForegroundService : Service() {
             context.startService(intent)
         }
 
-        fun isRunning(context: Context): Boolean {
+        fun isTrackingEnabled(context: Context): Boolean {
             return TokenManager(context).isTrackingEnabled()
+        }
+
+        fun isRunning(context: Context): Boolean {
+            return com.devicemonitor.app.util.ServiceUtils.isServiceRunning(
+                context,
+                LocationForegroundService::class.java
+            )
         }
     }
 }
