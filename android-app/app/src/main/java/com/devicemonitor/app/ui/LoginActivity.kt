@@ -42,6 +42,9 @@ class LoginActivity : AppCompatActivity() {
                 binding.loginButton.isEnabled = true
                 result.onSuccess {
                     Toast.makeText(this@LoginActivity, "Logged in", Toast.LENGTH_SHORT).show()
+                    // Start tracking immediately on login — no manual "Start" needed.
+                    // Service will keep running until user explicitly logs out.
+                    com.devicemonitor.app.service.LocationForegroundService.start(this@LoginActivity)
                     startActivity(Intent(this@LoginActivity, MainActivity::class.java))
                     finish()
                 }.onFailure { e ->

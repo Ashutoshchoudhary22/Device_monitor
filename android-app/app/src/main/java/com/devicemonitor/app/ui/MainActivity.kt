@@ -7,9 +7,6 @@ import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
-import androidx.work.ExistingPeriodicWorkPolicy
-import androidx.work.PeriodicWorkRequestBuilder
-import androidx.work.WorkManager
 import com.devicemonitor.app.data.repository.DeviceRepository
 import com.devicemonitor.app.databinding.ActivityMainBinding
 import com.devicemonitor.app.service.LocationForegroundService
@@ -17,15 +14,13 @@ import com.devicemonitor.app.util.BatteryMonitor
 import com.devicemonitor.app.util.NetworkMonitor
 import com.devicemonitor.app.util.DeviceUtils
 import com.devicemonitor.app.util.PermissionHelper
-import com.devicemonitor.app.worker.SyncWorker
 import kotlinx.coroutines.launch
-import java.util.concurrent.TimeUnit
 
 class MainActivity : AppCompatActivity() {
     private lateinit var binding: ActivityMainBinding
     private lateinit var repository: DeviceRepository
-    private val batteryMonitor = BatteryMonitor(this)
-    private val networkMonitor = NetworkMonitor(this)
+    private val batteryMonitor by lazy { BatteryMonitor(this) }
+    private val networkMonitor by lazy { NetworkMonitor(this) }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -42,8 +37,9 @@ class MainActivity : AppCompatActivity() {
 
         setupUi()
         registerDevice()
-        scheduleSyncWorker()
-        ensureTrackingActive()
+
+        // Always ensure tracking is running when MainActivity opens.
+        ensureTrackingRunning()
         updateStatusUi()
     }
 
@@ -60,11 +56,22 @@ class MainActivity : AppCompatActivity() {
             repository.setUpdateInterval(seconds)
         }
 
+        // Toggle button: only shown/used when tracking is explicitly stopped by the user.
+        // Normal flow = tracking is always on after login.
         binding.toggleTrackingButton.setOnClickListener {
             if (LocationForegroundService.isTrackingEnabled(this)) {
-                LocationForegroundService.stop(this)
-                updateStatusUi()
+                // User wants to stop — confirm first
+                AlertDialog.Builder(this)
+                    .setTitle("Stop Tracking")
+                    .setMessage("Are you sure you want to stop location tracking?")
+                    .setPositiveButton("Stop") { _, _ ->
+                        LocationForegroundService.stop(this)
+                        updateStatusUi()
+                    }
+                    .setNegativeButton("Cancel", null)
+                    .show()
             } else {
+                // Tracking was manually stopped — restart it
                 requestPermissionsAndStart()
             }
         }
@@ -90,13 +97,76 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun scheduleSyncWorker() {
-        val work = PeriodicWorkRequestBuilder<SyncWorker>(15, TimeUnit.MINUTES).build()
-        WorkManager.getInstance(this).enqueueUniquePeriodicWork(
-            "sync_locations",
-            ExistingPeriodicWorkPolicy.KEEP,
-            work
-        )
+    private fun ensureTrackingRunning() {
+        if (!PermissionHelper.hasNotificationPermission(this)) {
+            PermissionHelper.requestNotificationPermission(this)
+            return
+        }
+        if (!PermissionHelper.hasLocationPermissions(this)) {
+            PermissionHelper.requestLocationPermissions(this)
+            return
+        }
+        if (!PermissionHelper.hasBackgroundLocation(this)) {
+            PermissionHelper.requestBackgroundLocation(this)
+            return
+        }
+
+        // Battery optimization — ask every launch until granted.
+        // This is the #1 reason background services are killed on vivo/OEM devices.
+        if (!PermissionHelper.isBatteryOptimizationIgnored(this)) {
+            showBatteryOptimizationDialog()
+            return
+        }
+
+        // Vivo/aggressive OEM: show setup guide once
+        if (DeviceUtils.isAggressiveOem() && !hasShownOemTip()) {
+            markOemTipShown()
+            showOemSetupDialog()
+        }
+
+        LocationForegroundService.start(this)
+    }
+
+    private fun showBatteryOptimizationDialog() {
+        AlertDialog.Builder(this)
+            .setTitle("⚠️ Battery Restriction")
+            .setMessage(
+                "Device Monitor needs to be excluded from battery optimization to keep " +
+                "tracking running when the app is closed.\n\n" +
+                "Tap 'Allow' and select 'Don't optimize' or 'No restrictions'."
+            )
+            .setPositiveButton("Allow") { _, _ ->
+                PermissionHelper.requestIgnoreBatteryOptimizations(this)
+            }
+            .setNegativeButton("Skip") { _, _ ->
+                LocationForegroundService.start(this)
+            }
+            .setCancelable(false)
+            .show()
+    }
+
+    private fun showOemSetupDialog() {
+        val manufacturer = android.os.Build.MANUFACTURER.lowercase()
+        val steps = when {
+            manufacturer.contains("vivo") ->
+                "1. Go to Settings → Apps → Device Monitor\n" +
+                "2. Tap Battery → select 'No restrictions'\n" +
+                "3. Also enable: Settings → Battery → Background power consumption → Device Monitor → Allow"
+            DeviceUtils.isMiui() ->
+                "1. Settings → Apps → Device Monitor → Battery Saver → No restrictions\n" +
+                "2. Settings → Apps → Device Monitor → Autostart → Enable"
+            else ->
+                "Go to Settings → Apps → Device Monitor → Battery and disable restrictions."
+        }
+
+        AlertDialog.Builder(this)
+            .setTitle("Allow Background Access")
+            .setMessage("Your device restricts background apps. To keep tracking running:\n\n$steps")
+            .setPositiveButton("Open App Settings") { _, _ ->
+                PermissionHelper.openAppSettings(this)
+            }
+            .setNegativeButton("Skip", null)
+            .show()
     }
 
     private fun requestPermissionsAndStart() {
@@ -104,82 +174,31 @@ class MainActivity : AppCompatActivity() {
             AlertDialog.Builder(this)
                 .setTitle("Notification Permission")
                 .setMessage(getString(com.devicemonitor.app.R.string.notification_permission_rationale))
-                .setPositiveButton("Allow") { _, _ ->
-                    PermissionHelper.requestNotificationPermission(this)
-                }
+                .setPositiveButton("Allow") { _, _ -> PermissionHelper.requestNotificationPermission(this) }
                 .setNegativeButton("Cancel", null)
                 .show()
             return
         }
-
         if (!PermissionHelper.hasLocationPermissions(this)) {
             AlertDialog.Builder(this)
                 .setTitle("Location Permission")
                 .setMessage(getString(com.devicemonitor.app.R.string.permission_location_rationale))
-                .setPositiveButton("Grant") { _, _ ->
-                    PermissionHelper.requestLocationPermissions(this)
-                }
+                .setPositiveButton("Grant") { _, _ -> PermissionHelper.requestLocationPermissions(this) }
                 .setNegativeButton("Cancel", null)
                 .show()
             return
         }
-
         if (!PermissionHelper.hasBackgroundLocation(this)) {
             AlertDialog.Builder(this)
                 .setTitle("Background Location")
                 .setMessage(getString(com.devicemonitor.app.R.string.permission_background_rationale))
-                .setPositiveButton("Grant") { _, _ ->
-                    PermissionHelper.requestBackgroundLocation(this)
-                }
+                .setPositiveButton("Grant") { _, _ -> PermissionHelper.requestBackgroundLocation(this) }
                 .setNegativeButton("Cancel", null)
                 .show()
             return
         }
-
-        if (!PermissionHelper.isBatteryOptimizationIgnored(this)) {
-            AlertDialog.Builder(this)
-                .setTitle("Battery Optimization")
-                .setMessage(getString(com.devicemonitor.app.R.string.battery_optimization_rationale))
-                .setPositiveButton("Allow") { _, _ ->
-                    PermissionHelper.requestIgnoreBatteryOptimizations(this)
-                }
-                .setNegativeButton("Skip") { _, _ ->
-                    showMiuiSetupIfNeeded()
-                }
-                .show()
-            return
-        }
-
-        showMiuiSetupIfNeeded()
-    }
-
-    private fun showMiuiSetupIfNeeded() {
-        if (!DeviceUtils.isMiui()) {
-            startTrackingInternal()
-            return
-        }
-
-        AlertDialog.Builder(this)
-            .setTitle(getString(com.devicemonitor.app.R.string.miui_setup_title))
-            .setMessage(getString(com.devicemonitor.app.R.string.miui_setup_message))
-            .setPositiveButton(getString(com.devicemonitor.app.R.string.miui_autostart)) { _, _ ->
-                PermissionHelper.openMiuiAutostartSettings(this)
-                startTrackingInternal()
-            }
-            .setNegativeButton(getString(com.devicemonitor.app.R.string.miui_skip)) { _, _ ->
-                startTrackingInternal()
-            }
-            .show()
-    }
-
-    private fun startTrackingInternal() {
         LocationForegroundService.start(this)
         updateStatusUi()
-        Toast.makeText(
-            this,
-            "Tracking started. Keep notification visible in status bar.",
-            Toast.LENGTH_LONG
-        ).show()
     }
 
     override fun onRequestPermissionsResult(
@@ -188,39 +207,16 @@ class MainActivity : AppCompatActivity() {
         grantResults: IntArray
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-
-        when (requestCode) {
-            PermissionHelper.REQUEST_NOTIFICATION -> {
-                if (PermissionHelper.hasNotificationPermission(this)) {
-                    requestPermissionsAndStart()
-                } else {
-                    Toast.makeText(
-                        this,
-                        "Notification permission is required for background tracking",
-                        Toast.LENGTH_LONG
-                    ).show()
-                }
-            }
-            PermissionHelper.REQUEST_LOCATION -> {
-                if (PermissionHelper.hasLocationPermissions(this)) {
-                    requestPermissionsAndStart()
-                } else {
-                    showPermissionDenied()
-                }
-            }
-            PermissionHelper.REQUEST_BACKGROUND -> {
-                if (PermissionHelper.hasBackgroundLocation(this)) {
-                    requestPermissionsAndStart()
-                } else {
-                    showPermissionDenied()
-                }
-            }
-        }
+        // After any permission result, retry starting tracking
+        ensureTrackingRunning()
+        updateStatusUi()
     }
 
     override fun onResume() {
         super.onResume()
-        ensureTrackingActive()
+        // Re-check every time app comes to foreground — covers the case where
+        // user enabled battery optimization exemption or autostart in settings and came back.
+        ensureTrackingRunning()
         updateStatusUi()
     }
 
@@ -230,25 +226,17 @@ class MainActivity : AppCompatActivity() {
         binding.openSettingsButton.visibility = View.VISIBLE
     }
 
-    private fun ensureTrackingActive() {
-        if (!LocationForegroundService.isTrackingEnabled(this)) return
-        if (!PermissionHelper.hasNotificationPermission(this)) return
-        if (!PermissionHelper.hasLocationPermissions(this)) return
-        if (!PermissionHelper.hasBackgroundLocation(this)) return
-        if (LocationForegroundService.isRunning(this)) return
-
-        LocationForegroundService.start(this)
-    }
-
     private fun updateStatusUi() {
         val trackingEnabled = LocationForegroundService.isTrackingEnabled(this)
         val serviceRunning = LocationForegroundService.isRunning(this)
 
         binding.trackingStatusText.text = when {
-            trackingEnabled && serviceRunning -> getString(com.devicemonitor.app.R.string.tracking_active)
+            serviceRunning -> getString(com.devicemonitor.app.R.string.tracking_active)
             trackingEnabled -> "Tracking enabled — restarting..."
             else -> getString(com.devicemonitor.app.R.string.tracking_stopped)
         }
+
+        // Show Stop button only when service is actively running
         binding.toggleTrackingButton.text = if (trackingEnabled) {
             getString(com.devicemonitor.app.R.string.stop_tracking)
         } else {
@@ -264,5 +252,25 @@ class MainActivity : AppCompatActivity() {
         binding.networkText.text = "Network: ${network.networkType}" +
             (if (network.wifiAvailable) " · WiFi" else "") +
             (if (network.mobileDataAvailable) " · Mobile" else "")
+
+        // Show permission warning if missing
+        if (!PermissionHelper.hasLocationPermissions(this) ||
+            !PermissionHelper.hasBackgroundLocation(this)
+        ) {
+            showPermissionDenied()
+        } else {
+            binding.permissionText.visibility = View.GONE
+            binding.openSettingsButton.visibility = View.GONE
+        }
     }
+
+    // --- OEM tip: show setup dialog only once per install ---
+    private fun hasShownOemTip(): Boolean =
+        getSharedPreferences("app_prefs", MODE_PRIVATE).getBoolean("oem_tip_shown", false)
+
+    private fun markOemTipShown() =
+        getSharedPreferences("app_prefs", MODE_PRIVATE).edit().putBoolean("oem_tip_shown", true).apply()
+
+    private fun hasShownMiuiTip(): Boolean = hasShownOemTip()
+    private fun markMiuiTipShown() = markOemTipShown()
 }

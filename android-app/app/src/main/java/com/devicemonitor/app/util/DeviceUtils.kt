@@ -10,6 +10,19 @@ object DeviceUtils {
             !getSystemProperty("ro.miui.ui.version.name").isNullOrBlank()
     }
 
+    fun isVivo(): Boolean {
+        return Build.MANUFACTURER.equals("vivo", ignoreCase = true) ||
+            !getSystemProperty("ro.vivo.os.version").isNullOrBlank()
+    }
+
+    fun isAggressiveOem(): Boolean = isMiui() || isVivo() ||
+        Build.MANUFACTURER.equals("Huawei", ignoreCase = true) ||
+        Build.MANUFACTURER.equals("Honor", ignoreCase = true) ||
+        Build.MANUFACTURER.equals("OnePlus", ignoreCase = true) ||
+        Build.MANUFACTURER.equals("Oppo", ignoreCase = true) ||
+        Build.MANUFACTURER.equals("Realme", ignoreCase = true) ||
+        Build.MANUFACTURER.equals("Samsung", ignoreCase = true)
+
     private fun getSystemProperty(key: String): String? {
         return try {
             val clazz = Class.forName("android.os.SystemProperties")

@@ -6,6 +6,9 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.app.job.JobInfo
+import android.app.job.JobScheduler
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
@@ -23,6 +26,7 @@ import com.devicemonitor.app.data.prefs.TokenManager
 import com.devicemonitor.app.data.repository.DeviceRepository
 import com.devicemonitor.app.receiver.TrackingRestartReceiver
 import com.devicemonitor.app.ui.MainActivity
+import com.devicemonitor.app.util.NetworkMonitor
 import com.devicemonitor.app.util.PermissionHelper
 import com.devicemonitor.app.util.ServiceUtils
 import com.google.android.gms.location.LocationCallback
@@ -46,6 +50,7 @@ class LocationForegroundService : Service() {
     private var statusJob: Job? = null
     private lateinit var repository: DeviceRepository
     private lateinit var tokenManager: TokenManager
+    private lateinit var networkMonitor: NetworkMonitor
     private lateinit var fusedLocationClient: com.google.android.gms.location.FusedLocationProviderClient
     private var locationCallback: LocationCallback? = null
     private var locationThread: HandlerThread? = null
@@ -57,12 +62,10 @@ class LocationForegroundService : Service() {
         super.onCreate()
         repository = DeviceRepository(this)
         tokenManager = TokenManager(this)
+        networkMonitor = NetworkMonitor(this)
         fusedLocationClient = LocationServices.getFusedLocationProviderClient(this)
         createNotificationChannel()
-        // Mark running immediately in onCreate so isRunning() is reliable from first call.
-        // Also promotes to foreground here to satisfy Android 14 requirement that
-        // startForeground() must be called within onCreate/onStartCommand without delay.
-        ServiceUtils.markServiceRunning(LocationForegroundService::class.java)
+        ServiceUtils.markServiceRunning(this, LocationForegroundService::class.java)
         promoteToForeground()
     }
 
@@ -73,12 +76,15 @@ class LocationForegroundService : Service() {
                 return START_NOT_STICKY
             }
             else -> {
-                // promoteToForeground() already called in onCreate; calling again is safe
-                // (updates notification) and needed if service is restarted by the system.
                 promoteToForeground()
                 if (!trackingActive) {
                     startTracking()
                 }
+                // Schedule a watchdog alarm every time service starts/restarts.
+                // This alarm fires even if vivo kills the process without calling
+                // onDestroy or onTaskRemoved — it's a persistent heartbeat.
+                scheduleWatchdog()
+                scheduleRestartJob()
             }
         }
         return START_STICKY
@@ -106,17 +112,12 @@ class LocationForegroundService : Service() {
             "DeviceMonitor::LocationTracking"
         ).apply {
             setReferenceCounted(false)
-            // No timeout — held until releaseWakeLock() is called explicitly when
-            // tracking stops. A timed acquire (e.g. 10 min) caused location updates
-            // to silently stop after the lock expired.
             acquire()
         }
     }
 
     private fun releaseWakeLock() {
-        wakeLock?.let {
-            if (it.isHeld) it.release()
-        }
+        wakeLock?.let { if (it.isHeld) it.release() }
         wakeLock = null
     }
 
@@ -125,11 +126,11 @@ class LocationForegroundService : Service() {
         tokenManager.setTrackingEnabled(true)
         acquireWakeLock()
         updateNotification()
-
         startLocationThread()
         startLocationUpdates()
         fetchImmediateLocation()
         startPeriodicStatusUpdates()
+        startNetworkMonitoring()
 
         serviceScope.launch {
             repository.registerDevice()
@@ -151,14 +152,18 @@ class LocationForegroundService : Service() {
             tokenManager.setTrackingEnabled(false)
             serviceScope.launch { repository.sendStatus(false) }
             repository.disconnectSocket()
+            // User explicitly stopped — cancel all watchdog alarms and jobs
+            cancelWatchdog()
+            cancelRestartJob()
         }
         stopLocationUpdates()
         statusJob?.cancel()
         releaseWakeLock()
+        networkMonitor.unregisterNetworkCallback()
         locationThread?.quitSafely()
         locationThread = null
         locationLooper = null
-        ServiceUtils.markServiceStopped(LocationForegroundService::class.java)
+        ServiceUtils.markServiceStopped(this, LocationForegroundService::class.java)
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
@@ -182,11 +187,7 @@ class LocationForegroundService : Service() {
         }
 
         try {
-            fusedLocationClient.requestLocationUpdates(
-                locationRequest,
-                locationCallback!!,
-                looper
-            )
+            fusedLocationClient.requestLocationUpdates(locationRequest, locationCallback!!, looper)
         } catch (_: SecurityException) {
             updateNotification("Location permission missing — open app to fix")
         }
@@ -197,7 +198,6 @@ class LocationForegroundService : Service() {
             fusedLocationClient.lastLocation.addOnSuccessListener { location ->
                 if (location != null) handleLocation(location)
             }
-
             val cancellationToken = CancellationTokenSource()
             fusedLocationClient.getCurrentLocation(
                 Priority.PRIORITY_HIGH_ACCURACY,
@@ -205,9 +205,7 @@ class LocationForegroundService : Service() {
             ).addOnSuccessListener { location ->
                 if (location != null) handleLocation(location)
             }
-        } catch (_: SecurityException) {
-            // handled in startLocationUpdates
-        }
+        } catch (_: SecurityException) {}
     }
 
     private fun handleLocation(location: Location) {
@@ -237,6 +235,19 @@ class LocationForegroundService : Service() {
         locationCallback = null
     }
 
+    private fun startNetworkMonitoring() {
+        networkMonitor.registerNetworkCallback {
+            serviceScope.launch {
+                acquireWakeLock()
+                repository.connectSocket()
+                repository.sendStatus(true)
+                repository.sendBattery()
+                repository.syncQueuedLocations()
+                fetchImmediateLocation()
+            }
+        }
+    }
+
     private fun startPeriodicStatusUpdates() {
         statusJob?.cancel()
         statusJob = serviceScope.launch {
@@ -253,8 +264,12 @@ class LocationForegroundService : Service() {
 
     override fun onTaskRemoved(rootIntent: Intent?) {
         super.onTaskRemoved(rootIntent)
-        if (!tokenManager.isTrackingEnabled()) return
-        scheduleRestart(RESTART_REQUEST_CODE)
+        // vivo may call this, may not — watchdog alarm already set in onStartCommand
+        // so this is just extra insurance
+        if (tokenManager.isTrackingEnabled()) {
+            scheduleWatchdog()
+            scheduleRestartJob()
+        }
     }
 
     override fun onDestroy() {
@@ -262,63 +277,110 @@ class LocationForegroundService : Service() {
         statusJob?.cancel()
         stopLocationUpdates()
         releaseWakeLock()
+        networkMonitor.unregisterNetworkCallback()
         locationThread?.quitSafely()
         locationThread = null
         locationLooper = null
         serviceScope.cancel()
-        ServiceUtils.markServiceStopped(LocationForegroundService::class.java)
+        ServiceUtils.markServiceStopped(this, LocationForegroundService::class.java)
 
+        // If tracking still enabled (OS killed us, not user), reschedule watchdog
         if (tokenManager.isTrackingEnabled()) {
-            scheduleRestart(RESTART_REQUEST_CODE + 1)
+            scheduleWatchdog()
+            scheduleRestartJob()
         }
 
         super.onDestroy()
     }
 
-    private fun scheduleRestart(requestCode: Int) {
-        val restartIntent = Intent(applicationContext, TrackingRestartReceiver::class.java)
-        val pendingIntent = PendingIntent.getBroadcast(
+    // -------------------------------------------------------------------------
+    // WATCHDOG: A repeating alarm that fires every WATCHDOG_INTERVAL_MS.
+    // Unlike a one-shot alarm scheduled in onDestroy (which never fires when
+    // vivo uses SIGKILL), this repeating alarm is SET BEFORE the process dies
+    // and will keep firing until explicitly cancelled via cancelWatchdog().
+    //
+    // TrackingRestartReceiver checks if service is running; if not, restarts it.
+    // -------------------------------------------------------------------------
+    private fun scheduleWatchdog() {
+        val intent = Intent(applicationContext, TrackingRestartReceiver::class.java)
+        val pi = PendingIntent.getBroadcast(
             applicationContext,
-            requestCode,
-            restartIntent,
+            WATCHDOG_REQUEST_CODE,
+            intent,
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
+        val am = getSystemService(Context.ALARM_SERVICE) as AlarmManager
+        val triggerAt = SystemClock.elapsedRealtime() + WATCHDOG_INTERVAL_MS
 
-        val alarmManager = getSystemService(Context.ALARM_SERVICE) as AlarmManager
-        val triggerAt = SystemClock.elapsedRealtime() + 2_000
-
-        // On Android 12+ SCHEDULE_EXACT_ALARM requires user grant; fall back to
-        // inexact setAndAllowWhileIdle() so the restart still fires (just slightly later).
         try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && !alarmManager.canScheduleExactAlarms()) {
-                alarmManager.setAndAllowWhileIdle(
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && !am.canScheduleExactAlarms()) {
+                // setRepeating is inexact but always allowed — fires roughly every interval
+                am.setRepeating(
                     AlarmManager.ELAPSED_REALTIME_WAKEUP,
                     triggerAt,
-                    pendingIntent
+                    WATCHDOG_INTERVAL_MS,
+                    pi
                 )
             } else {
-                alarmManager.setExactAndAllowWhileIdle(
+                // Use exact + chain: receiver reschedules itself after each fire
+                am.setExactAndAllowWhileIdle(
                     AlarmManager.ELAPSED_REALTIME_WAKEUP,
                     triggerAt,
-                    pendingIntent
+                    pi
                 )
             }
         } catch (_: SecurityException) {
-            // Last resort — inexact alarm, no permission needed
-            alarmManager.setAndAllowWhileIdle(
+            am.setRepeating(
                 AlarmManager.ELAPSED_REALTIME_WAKEUP,
                 triggerAt,
-                pendingIntent
+                WATCHDOG_INTERVAL_MS,
+                pi
             )
         }
     }
 
+    private fun cancelWatchdog() {
+        val intent = Intent(applicationContext, TrackingRestartReceiver::class.java)
+        val pi = PendingIntent.getBroadcast(
+            applicationContext,
+            WATCHDOG_REQUEST_CODE,
+            intent,
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_NO_CREATE
+        )
+        if (pi != null) {
+            (getSystemService(Context.ALARM_SERVICE) as AlarmManager).cancel(pi)
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // RESTART JOB: JobScheduler fires even when alarm is suppressed by vivo
+    // -------------------------------------------------------------------------
+    private fun scheduleRestartJob() {
+        try {
+            val js = getSystemService(Context.JOB_SCHEDULER_SERVICE) as JobScheduler
+            val job = JobInfo.Builder(
+                RestartJobService.JOB_ID,
+                ComponentName(applicationContext, RestartJobService::class.java)
+            )
+                .setMinimumLatency(WATCHDOG_INTERVAL_MS)
+                .setOverrideDeadline(WATCHDOG_INTERVAL_MS * 3)
+                .setPersisted(true)   // survives reboot
+                .build()
+            js.schedule(job)
+        } catch (_: Exception) {}
+    }
+
+    private fun cancelRestartJob() {
+        try {
+            val js = getSystemService(Context.JOB_SCHEDULER_SERVICE) as JobScheduler
+            js.cancel(RestartJobService.JOB_ID)
+        } catch (_: Exception) {}
+    }
+
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
-
         val manager = getSystemService(NotificationManager::class.java)
         manager.deleteNotificationChannel(CHANNEL_ID_LEGACY)
-
         val channel = NotificationChannel(
             CHANNEL_ID,
             getString(R.string.location_notification_title),
@@ -334,19 +396,15 @@ class LocationForegroundService : Service() {
 
     private fun buildNotification(subtitle: String? = null): Notification {
         val openIntent = PendingIntent.getActivity(
-            this,
-            0,
+            this, 0,
             Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
-
         val stopIntent = PendingIntent.getService(
-            this,
-            1,
+            this, 1,
             Intent(this, LocationForegroundService::class.java).apply { action = ACTION_STOP },
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
-
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle(getString(R.string.location_notification_title))
             .setContentText(subtitle ?: getString(R.string.location_notification_text))
@@ -369,34 +427,33 @@ class LocationForegroundService : Service() {
         private const val CHANNEL_ID_LEGACY = "location_tracking"
         const val NOTIFICATION_ID = 1001
         const val ACTION_STOP = "com.devicemonitor.app.ACTION_STOP_TRACKING"
-        private const val RESTART_REQUEST_CODE = 2001
+        private const val WATCHDOG_REQUEST_CODE = 3001
+        private const val WATCHDOG_INTERVAL_MS = 60_000L  // 60 seconds
 
         fun start(context: Context) {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
-                !PermissionHelper.hasNotificationPermission(context)
-            ) {
-                return
-            }
             val intent = Intent(context.applicationContext, LocationForegroundService::class.java)
             context.applicationContext.startForegroundService(intent)
         }
 
         fun stop(context: Context) {
-            val intent = Intent(context.applicationContext, LocationForegroundService::class.java).apply {
-                action = ACTION_STOP
-            }
+            val intent = Intent(context.applicationContext, LocationForegroundService::class.java)
+                .apply { action = ACTION_STOP }
             context.applicationContext.startService(intent)
         }
 
-        fun isTrackingEnabled(context: Context): Boolean {
-            return TokenManager(context).isTrackingEnabled()
-        }
+        fun isTrackingEnabled(context: Context): Boolean = TokenManager(context).isTrackingEnabled()
 
-        fun isRunning(context: Context): Boolean {
-            return com.devicemonitor.app.util.ServiceUtils.isServiceRunning(
-                context,
-                LocationForegroundService::class.java
-            )
+        fun isRunning(context: Context): Boolean =
+            ServiceUtils.isServiceRunning(context, LocationForegroundService::class.java)
+
+        fun buildSyncNotification(context: Context): Notification {
+            return NotificationCompat.Builder(context, CHANNEL_ID)
+                .setContentTitle("Device Monitor")
+                .setContentText("Syncing location data…")
+                .setSmallIcon(R.drawable.ic_location)
+                .setOngoing(false)
+                .setPriority(NotificationCompat.PRIORITY_LOW)
+                .build()
         }
     }
 }
