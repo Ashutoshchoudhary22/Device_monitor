@@ -24,6 +24,7 @@ import com.devicemonitor.app.data.repository.DeviceRepository
 import com.devicemonitor.app.receiver.TrackingRestartReceiver
 import com.devicemonitor.app.ui.MainActivity
 import com.devicemonitor.app.util.PermissionHelper
+import com.devicemonitor.app.util.ServiceUtils
 import com.google.android.gms.location.LocationCallback
 import com.google.android.gms.location.LocationRequest
 import com.google.android.gms.location.LocationResult
@@ -58,6 +59,11 @@ class LocationForegroundService : Service() {
         tokenManager = TokenManager(this)
         fusedLocationClient = LocationServices.getFusedLocationProviderClient(this)
         createNotificationChannel()
+        // Mark running immediately in onCreate so isRunning() is reliable from first call.
+        // Also promotes to foreground here to satisfy Android 14 requirement that
+        // startForeground() must be called within onCreate/onStartCommand without delay.
+        ServiceUtils.markServiceRunning(LocationForegroundService::class.java)
+        promoteToForeground()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -67,6 +73,8 @@ class LocationForegroundService : Service() {
                 return START_NOT_STICKY
             }
             else -> {
+                // promoteToForeground() already called in onCreate; calling again is safe
+                // (updates notification) and needed if service is restarted by the system.
                 promoteToForeground()
                 if (!trackingActive) {
                     startTracking()
@@ -98,7 +106,10 @@ class LocationForegroundService : Service() {
             "DeviceMonitor::LocationTracking"
         ).apply {
             setReferenceCounted(false)
-            acquire(10 * 60 * 1000L)
+            // No timeout — held until releaseWakeLock() is called explicitly when
+            // tracking stops. A timed acquire (e.g. 10 min) caused location updates
+            // to silently stop after the lock expired.
+            acquire()
         }
     }
 
@@ -147,6 +158,7 @@ class LocationForegroundService : Service() {
         locationThread?.quitSafely()
         locationThread = null
         locationLooper = null
+        ServiceUtils.markServiceStopped(LocationForegroundService::class.java)
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
@@ -254,6 +266,7 @@ class LocationForegroundService : Service() {
         locationThread = null
         locationLooper = null
         serviceScope.cancel()
+        ServiceUtils.markServiceStopped(LocationForegroundService::class.java)
 
         if (tokenManager.isTrackingEnabled()) {
             scheduleRestart(RESTART_REQUEST_CODE + 1)
@@ -272,11 +285,32 @@ class LocationForegroundService : Service() {
         )
 
         val alarmManager = getSystemService(Context.ALARM_SERVICE) as AlarmManager
-        alarmManager.setExactAndAllowWhileIdle(
-            AlarmManager.ELAPSED_REALTIME_WAKEUP,
-            SystemClock.elapsedRealtime() + 2_000,
-            pendingIntent
-        )
+        val triggerAt = SystemClock.elapsedRealtime() + 2_000
+
+        // On Android 12+ SCHEDULE_EXACT_ALARM requires user grant; fall back to
+        // inexact setAndAllowWhileIdle() so the restart still fires (just slightly later).
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && !alarmManager.canScheduleExactAlarms()) {
+                alarmManager.setAndAllowWhileIdle(
+                    AlarmManager.ELAPSED_REALTIME_WAKEUP,
+                    triggerAt,
+                    pendingIntent
+                )
+            } else {
+                alarmManager.setExactAndAllowWhileIdle(
+                    AlarmManager.ELAPSED_REALTIME_WAKEUP,
+                    triggerAt,
+                    pendingIntent
+                )
+            }
+        } catch (_: SecurityException) {
+            // Last resort — inexact alarm, no permission needed
+            alarmManager.setAndAllowWhileIdle(
+                AlarmManager.ELAPSED_REALTIME_WAKEUP,
+                triggerAt,
+                pendingIntent
+            )
+        }
     }
 
     private fun createNotificationChannel() {

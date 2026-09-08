@@ -42,7 +42,7 @@ class SocketManager(private val tokenManager: TokenManager) {
             reconnectionDelay = 1000
             reconnectionDelayMax = 5000
             transports = arrayOf("websocket", "polling")
-            timeout = 15000
+            timeout = 20000
         }
 
         socket = IO.socket(BuildConfig.SOCKET_URL, options).apply {
@@ -61,7 +61,7 @@ class SocketManager(private val tokenManager: TokenManager) {
         val options = IO.Options().apply {
             reconnection = true
             transports = arrayOf("websocket", "polling")
-            timeout = 15000
+            timeout = 20000
         }
 
         socket = IO.socket(BuildConfig.SOCKET_URL, options)
@@ -84,6 +84,21 @@ class SocketManager(private val tokenManager: TokenManager) {
         return if (isConnected()) socket!! else connect()
     }
 
+    /**
+     * Waits up to [CONNECT_WAIT_MS] for the socket to become connected before emitting.
+     * This prevents the "socket timeout" that happens when emit fires before the
+     * TCP/WebSocket handshake completes.
+     */
+    private suspend fun waitForConnection(sock: Socket): Boolean {
+        if (sock.connected()) return true
+        return withTimeoutOrNull(CONNECT_WAIT_MS) {
+            suspendCancellableCoroutine { cont ->
+                sock.once(Socket.EVENT_CONNECT) { cont.resume(true) }
+                sock.once(Socket.EVENT_CONNECT_ERROR) { cont.resume(false) }
+            }
+        } ?: false
+    }
+
     suspend fun emitAck(event: String, data: JSONObject, guest: Boolean = false): JSONObject {
         return withTimeoutOrNull(EMIT_TIMEOUT_MS) {
             suspendCancellableCoroutine { cont ->
@@ -93,11 +108,30 @@ class SocketManager(private val tokenManager: TokenManager) {
                         else -> ensureConnected()
                     }
 
-                    activeSocket.emit(event, data, Ack { args ->
-                        val response = args.firstOrNull() as? JSONObject
-                            ?: JSONObject().put("ok", false).put("error", "Empty response")
-                        cont.resume(response)
-                    })
+                    // If socket is not yet connected, wait for connection before emitting.
+                    // Without this, emit fires immediately and the ack never arrives because
+                    // the underlying transport isn't ready yet — causing a false timeout.
+                    if (!activeSocket.connected()) {
+                        activeSocket.once(Socket.EVENT_CONNECT) {
+                            activeSocket.emit(event, data, Ack { args ->
+                                val response = args.firstOrNull() as? JSONObject
+                                    ?: JSONObject().put("ok", false).put("error", "Empty response")
+                                if (cont.isActive) cont.resume(response)
+                            })
+                        }
+                        activeSocket.once(Socket.EVENT_CONNECT_ERROR) { args ->
+                            val err = args.firstOrNull()?.toString() ?: "Connection failed"
+                            if (cont.isActive) cont.resume(
+                                JSONObject().put("ok", false).put("error", err)
+                            )
+                        }
+                    } else {
+                        activeSocket.emit(event, data, Ack { args ->
+                            val response = args.firstOrNull() as? JSONObject
+                                ?: JSONObject().put("ok", false).put("error", "Empty response")
+                            if (cont.isActive) cont.resume(response)
+                        })
+                    }
                 } catch (e: Exception) {
                     cont.resume(
                         JSONObject()
@@ -110,6 +144,7 @@ class SocketManager(private val tokenManager: TokenManager) {
     }
 
     companion object {
-        private const val EMIT_TIMEOUT_MS = 8_000L
+        private const val EMIT_TIMEOUT_MS = 20_000L   // increased from 8s — gives time to connect + get ack
+        private const val CONNECT_WAIT_MS = 15_000L   // max wait for socket handshake before emitting
     }
 }

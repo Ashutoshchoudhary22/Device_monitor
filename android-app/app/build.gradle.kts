@@ -20,8 +20,8 @@ android {
 
     buildTypes {
         debug {
-            buildConfigField("String", "API_BASE_URL", "\"http://192.168.1.59:3001/api/\"")
-            buildConfigField("String", "SOCKET_URL", "\"http://192.168.1.59:3001\"")
+            buildConfigField("String", "API_BASE_URL", "\"https://device.faltu.shop/api/\"")
+            buildConfigField("String", "SOCKET_URL", "\"https://device.faltu.shop\"")
         }
         release {
             isMinifyEnabled = false
