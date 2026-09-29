@@ -80,6 +80,25 @@ class DeviceRepository(private val context: Context) {
         }
     }
 
+    /**
+     * Server JWTs expire (JWT_EXPIRES_IN, default 7d). An expired token makes every
+     * request return 401, which clears the token and stops tracking permanently,
+     * so keep rolling it forward while it is still valid.
+     */
+    suspend fun refreshTokenIfNeeded() {
+        if (tokenManager.getToken() == null) return
+        val age = System.currentTimeMillis() - tokenManager.getTokenSavedAt()
+        if (age in 0 until TOKEN_REFRESH_INTERVAL_MS) return
+        try {
+            val response = api.refreshToken()
+            val newToken = response.body()?.token
+            if (response.isSuccessful && !newToken.isNullOrBlank()) {
+                tokenManager.saveToken(newToken)
+            }
+        } catch (_: Exception) {
+        }
+    }
+
     suspend fun registerDevice(): Result<String> {
         val request = DeviceRegisterRequest(
             deviceId = getDeviceId(),
@@ -300,6 +319,10 @@ class DeviceRepository(private val context: Context) {
     }
 
     fun createLocationTimestamp(): String = Instant.now().toString()
+
+    companion object {
+        private const val TOKEN_REFRESH_INTERVAL_MS = 24 * 60 * 60 * 1000L
+    }
 
     data class LoginResult(
         val token: String,

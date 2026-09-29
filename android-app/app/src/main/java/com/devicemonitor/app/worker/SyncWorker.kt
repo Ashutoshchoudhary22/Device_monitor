@@ -29,6 +29,7 @@ class SyncWorker(
             LocationForegroundService.start(applicationContext)
         }
 
+        repository.refreshTokenIfNeeded()
         val synced = repository.syncQueuedLocations()
         repository.sendBattery()
         repository.sendStatus(true)

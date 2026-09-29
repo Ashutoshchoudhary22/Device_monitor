@@ -1,9 +1,14 @@
 package com.devicemonitor.app.ui
 
+import android.Manifest
 import android.content.Intent
+import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
 import android.view.View
 import android.widget.Toast
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
@@ -22,6 +27,25 @@ class MainActivity : AppCompatActivity() {
     private val batteryMonitor by lazy { BatteryMonitor(this) }
     private val networkMonitor by lazy { NetworkMonitor(this) }
 
+    private enum class PermStep { NOTIFICATION, LOCATION, BACKGROUND, BATTERY, EXACT_ALARM, AUTOSTART }
+
+    // Each step is prompted at most once per flow so a denial can't cause an endless popup loop.
+    private val attemptedSteps = mutableSetOf<PermStep>()
+
+    private val permissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) {
+        runPermissionFlow()
+        updateStatusUi()
+    }
+
+    private val settingsLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) {
+        runPermissionFlow()
+        updateStatusUi()
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
@@ -38,8 +62,7 @@ class MainActivity : AppCompatActivity() {
         setupUi()
         registerDevice()
 
-        // Always ensure tracking is running when MainActivity opens.
-        ensureTrackingRunning()
+        startPermissionFlow()
         updateStatusUi()
     }
 
@@ -72,7 +95,7 @@ class MainActivity : AppCompatActivity() {
                     .show()
             } else {
                 // Tracking was manually stopped — restart it
-                requestPermissionsAndStart()
+                startPermissionFlow()
             }
         }
 
@@ -85,7 +108,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         binding.openSettingsButton.setOnClickListener {
-            PermissionHelper.openAppSettings(this)
+            startPermissionFlow()
         }
     }
 
@@ -97,133 +120,185 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun ensureTrackingRunning() {
-        if (!PermissionHelper.hasNotificationPermission(this)) {
-            PermissionHelper.requestNotificationPermission(this)
-            return
-        }
-        if (!PermissionHelper.hasLocationPermissions(this)) {
-            PermissionHelper.requestLocationPermissions(this)
-            return
-        }
-        if (!PermissionHelper.hasBackgroundLocation(this)) {
-            PermissionHelper.requestBackgroundLocation(this)
-            return
-        }
-
-        // Battery optimization — ask every launch until granted.
-        // This is the #1 reason background services are killed on vivo/OEM devices.
-        if (!PermissionHelper.isBatteryOptimizationIgnored(this)) {
-            showBatteryOptimizationDialog()
-            return
-        }
-
-        // Vivo/aggressive OEM: show setup guide once
-        if (DeviceUtils.isAggressiveOem() && !hasShownOemTip()) {
-            markOemTipShown()
-            showOemSetupDialog()
-        }
-
-        LocationForegroundService.start(this)
+    private fun startPermissionFlow() {
+        attemptedSteps.clear()
+        runPermissionFlow()
     }
 
-    private fun showBatteryOptimizationDialog() {
-        AlertDialog.Builder(this)
-            .setTitle("⚠️ Battery Restriction")
-            .setMessage(
-                "Device Monitor needs to be excluded from battery optimization to keep " +
-                "tracking running when the app is closed.\n\n" +
-                "Tap 'Allow' and select 'Don't optimize' or 'No restrictions'."
-            )
-            .setPositiveButton("Allow") { _, _ ->
-                PermissionHelper.requestIgnoreBatteryOptimizations(this)
-            }
-            .setNegativeButton("Skip") { _, _ ->
+    /** Prompts the next missing permission; starts tracking once nothing is left to ask. */
+    private fun runPermissionFlow() {
+        if (isFinishing || isDestroyed) return
+        val step = nextMissingStep()
+        if (step == null) {
+            if (PermissionHelper.hasLocationPermissions(this)) {
                 LocationForegroundService.start(this)
             }
+            updateStatusUi()
+            return
+        }
+        attemptedSteps.add(step)
+        when (step) {
+            PermStep.NOTIFICATION -> requestRuntime(
+                arrayOf(Manifest.permission.POST_NOTIFICATIONS),
+                "Notification Permission",
+                "Notifications are needed to show that tracking is running."
+            )
+
+            PermStep.LOCATION -> requestRuntime(
+                PermissionHelper.LOCATION_PERMISSIONS,
+                "Location Permission",
+                "Location access is required to track this device."
+            )
+
+            PermStep.BACKGROUND -> showStepDialog(
+                title = "Allow Location All the Time",
+                message = "On the next screen choose \"Allow all the time\" so location keeps " +
+                    "updating even when the app is closed.",
+                onContinue = {
+                    requestRuntime(
+                        arrayOf(Manifest.permission.ACCESS_BACKGROUND_LOCATION),
+                        "Allow Location All the Time",
+                        "Background location is required so tracking continues when the app is closed."
+                    )
+                }
+            )
+
+            PermStep.BATTERY -> {
+                // ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS is itself a system popup.
+                val launched = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                    tryLaunchSettings(
+                        Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
+                            .setData(Uri.parse("package:$packageName"))
+                    )
+                } else false
+                if (!launched) runPermissionFlow()
+            }
+
+            PermStep.EXACT_ALARM -> showStepDialog(
+                title = "Allow Alarms & Reminders",
+                message = "Enable \"Alarms & reminders\" so tracking can restart automatically " +
+                    "after the app is closed or the phone restarts.",
+                onContinue = {
+                    val launched = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                        tryLaunchSettings(
+                            Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM)
+                                .setData(Uri.parse("package:$packageName"))
+                        )
+                    } else false
+                    if (!launched) runPermissionFlow()
+                }
+            )
+
+            PermStep.AUTOSTART -> {
+                markOemTipShown()
+                showStepDialog(
+                    title = "Allow Background / Autostart",
+                    message = oemAutostartMessage(),
+                    onContinue = {
+                        if (!tryLaunchSettings(PermissionHelper.getAutostartIntent(this))) {
+                            runPermissionFlow()
+                        }
+                    }
+                )
+            }
+        }
+    }
+
+    private fun nextMissingStep(): PermStep? {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            !PermissionHelper.hasNotificationPermission(this) &&
+            PermStep.NOTIFICATION !in attemptedSteps
+        ) return PermStep.NOTIFICATION
+
+        if (!PermissionHelper.hasLocationPermissions(this) &&
+            PermStep.LOCATION !in attemptedSteps
+        ) return PermStep.LOCATION
+
+        // Background location can only be requested after foreground location is granted.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
+            PermissionHelper.hasLocationPermissions(this) &&
+            !PermissionHelper.hasBackgroundLocation(this) &&
+            PermStep.BACKGROUND !in attemptedSteps
+        ) return PermStep.BACKGROUND
+
+        if (!PermissionHelper.isBatteryOptimizationIgnored(this) &&
+            PermStep.BATTERY !in attemptedSteps
+        ) return PermStep.BATTERY
+
+        if (!PermissionHelper.canScheduleExactAlarms(this) &&
+            PermStep.EXACT_ALARM !in attemptedSteps
+        ) return PermStep.EXACT_ALARM
+
+        if (DeviceUtils.isAggressiveOem() && !hasShownOemTip() &&
+            PermStep.AUTOSTART !in attemptedSteps
+        ) return PermStep.AUTOSTART
+
+        return null
+    }
+
+    /**
+     * Shows the system permission popup. Once the user has denied twice, Android stops
+     * showing the popup and silently returns "denied", so send them to app settings instead.
+     */
+    private fun requestRuntime(permissions: Array<String>, title: String, message: String) {
+        val prefs = getSharedPreferences("app_prefs", MODE_PRIVATE)
+        val askedBefore = permissions.any { prefs.getBoolean("asked_$it", false) }
+        val popupAllowed = permissions.any { shouldShowRequestPermissionRationale(it) }
+        if (askedBefore && !popupAllowed) {
+            showStepDialog(
+                title = title,
+                message = "$message\n\nThis permission was denied earlier. On the next screen " +
+                    "open Permissions and allow it.",
+                onContinue = {
+                    if (!tryLaunchSettings(PermissionHelper.appDetailsIntent(this))) runPermissionFlow()
+                }
+            )
+            return
+        }
+        prefs.edit().apply { permissions.forEach { putBoolean("asked_$it", true) } }.apply()
+        permissionLauncher.launch(permissions)
+    }
+
+    private fun showStepDialog(title: String, message: String, onContinue: () -> Unit) {
+        if (isFinishing || isDestroyed) return
+        AlertDialog.Builder(this)
+            .setTitle(title)
+            .setMessage(message)
+            .setPositiveButton("Continue") { _, _ -> onContinue() }
+            .setNegativeButton("Skip") { _, _ -> runPermissionFlow() }
             .setCancelable(false)
             .show()
     }
 
-    private fun showOemSetupDialog() {
-        val manufacturer = android.os.Build.MANUFACTURER.lowercase()
-        val steps = when {
-            manufacturer.contains("vivo") ->
-                "1. Go to Settings → Apps → Device Monitor\n" +
-                "2. Tap Battery → select 'No restrictions'\n" +
-                "3. Also enable: Settings → Battery → Background power consumption → Device Monitor → Allow"
-            DeviceUtils.isMiui() ->
-                "1. Settings → Apps → Device Monitor → Battery Saver → No restrictions\n" +
-                "2. Settings → Apps → Device Monitor → Autostart → Enable"
-            else ->
-                "Go to Settings → Apps → Device Monitor → Battery and disable restrictions."
+    private fun tryLaunchSettings(intent: Intent): Boolean {
+        return try {
+            settingsLauncher.launch(intent)
+            true
+        } catch (_: Exception) {
+            false
         }
-
-        AlertDialog.Builder(this)
-            .setTitle("Allow Background Access")
-            .setMessage("Your device restricts background apps. To keep tracking running:\n\n$steps")
-            .setPositiveButton("Open App Settings") { _, _ ->
-                PermissionHelper.openAppSettings(this)
-            }
-            .setNegativeButton("Skip", null)
-            .show()
     }
 
-    private fun requestPermissionsAndStart() {
-        if (!PermissionHelper.hasNotificationPermission(this)) {
-            AlertDialog.Builder(this)
-                .setTitle("Notification Permission")
-                .setMessage(getString(com.devicemonitor.app.R.string.notification_permission_rationale))
-                .setPositiveButton("Allow") { _, _ -> PermissionHelper.requestNotificationPermission(this) }
-                .setNegativeButton("Cancel", null)
-                .show()
-            return
-        }
-        if (!PermissionHelper.hasLocationPermissions(this)) {
-            AlertDialog.Builder(this)
-                .setTitle("Location Permission")
-                .setMessage(getString(com.devicemonitor.app.R.string.permission_location_rationale))
-                .setPositiveButton("Grant") { _, _ -> PermissionHelper.requestLocationPermissions(this) }
-                .setNegativeButton("Cancel", null)
-                .show()
-            return
-        }
-        if (!PermissionHelper.hasBackgroundLocation(this)) {
-            AlertDialog.Builder(this)
-                .setTitle("Background Location")
-                .setMessage(getString(com.devicemonitor.app.R.string.permission_background_rationale))
-                .setPositiveButton("Grant") { _, _ -> PermissionHelper.requestBackgroundLocation(this) }
-                .setNegativeButton("Cancel", null)
-                .show()
-            return
-        }
-        LocationForegroundService.start(this)
-        updateStatusUi()
-    }
-
-    override fun onRequestPermissionsResult(
-        requestCode: Int,
-        permissions: Array<out String>,
-        grantResults: IntArray
-    ) {
-        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        // After any permission result, retry starting tracking
-        ensureTrackingRunning()
-        updateStatusUi()
+    private fun oemAutostartMessage(): String = when {
+        DeviceUtils.isVivo() ->
+            "Your vivo device stops background apps. On the next screen enable autostart / " +
+                "background running for Device Monitor, and set Battery to \"No restrictions\"."
+        DeviceUtils.isMiui() ->
+            "Your Xiaomi device stops background apps. On the next screen enable Autostart for " +
+                "Device Monitor, and set Battery Saver to \"No restrictions\"."
+        else ->
+            "Your device stops background apps. On the next screen allow Device Monitor to run in " +
+                "the background / autostart, and remove any battery restrictions."
     }
 
     override fun onResume() {
         super.onResume()
-        // Re-check every time app comes to foreground — covers the case where
-        // user enabled battery optimization exemption or autostart in settings and came back.
-        ensureTrackingRunning()
+        // Keeps tracking alive whenever the app is opened, without re-prompting steps the
+        // user already dismissed this session and without undoing an explicit "Stop".
+        if (LocationForegroundService.isTrackingEnabled(this)) {
+            LocationForegroundService.start(this)
+        }
         updateStatusUi()
-    }
-
-    private fun showPermissionDenied() {
-        binding.permissionText.text = getString(com.devicemonitor.app.R.string.permission_denied)
-        binding.permissionText.visibility = View.VISIBLE
-        binding.openSettingsButton.visibility = View.VISIBLE
     }
 
     private fun updateStatusUi() {
@@ -253,15 +328,25 @@ class MainActivity : AppCompatActivity() {
             (if (network.wifiAvailable) " · WiFi" else "") +
             (if (network.mobileDataAvailable) " · Mobile" else "")
 
-        // Show permission warning if missing
-        if (!PermissionHelper.hasLocationPermissions(this) ||
-            !PermissionHelper.hasBackgroundLocation(this)
-        ) {
-            showPermissionDenied()
+        val missing = missingPermissionLabels()
+        if (missing.isNotEmpty()) {
+            binding.permissionText.text =
+                "Background tracking may stop. Missing:\n• " + missing.joinToString("\n• ")
+            binding.permissionText.visibility = View.VISIBLE
+            binding.openSettingsButton.text = "Allow Permissions"
+            binding.openSettingsButton.visibility = View.VISIBLE
         } else {
             binding.permissionText.visibility = View.GONE
             binding.openSettingsButton.visibility = View.GONE
         }
+    }
+
+    private fun missingPermissionLabels(): List<String> = buildList {
+        if (!PermissionHelper.hasNotificationPermission(this@MainActivity)) add("Notifications")
+        if (!PermissionHelper.hasLocationPermissions(this@MainActivity)) add("Location")
+        if (!PermissionHelper.hasBackgroundLocation(this@MainActivity)) add("Location: Allow all the time")
+        if (!PermissionHelper.isBatteryOptimizationIgnored(this@MainActivity)) add("Battery: Don't optimize")
+        if (!PermissionHelper.canScheduleExactAlarms(this@MainActivity)) add("Alarms & reminders")
     }
 
     // --- OEM tip: show setup dialog only once per install ---
@@ -270,7 +355,4 @@ class MainActivity : AppCompatActivity() {
 
     private fun markOemTipShown() =
         getSharedPreferences("app_prefs", MODE_PRIVATE).edit().putBoolean("oem_tip_shown", true).apply()
-
-    private fun hasShownMiuiTip(): Boolean = hasShownOemTip()
-    private fun markMiuiTipShown() = markOemTipShown()
 }

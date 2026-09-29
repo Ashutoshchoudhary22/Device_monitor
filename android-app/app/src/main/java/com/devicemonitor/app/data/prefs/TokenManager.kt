@@ -19,8 +19,13 @@ class TokenManager(context: Context) {
     )
 
     fun saveToken(token: String) {
-        prefs.edit().putString(KEY_TOKEN, token).apply()
+        prefs.edit()
+            .putString(KEY_TOKEN, token)
+            .putLong(KEY_TOKEN_SAVED_AT, System.currentTimeMillis())
+            .apply()
     }
+
+    fun getTokenSavedAt(): Long = prefs.getLong(KEY_TOKEN_SAVED_AT, 0L)
 
     fun getToken(): String? = prefs.getString(KEY_TOKEN, null)
 
@@ -42,6 +47,7 @@ class TokenManager(context: Context) {
 
     companion object {
         private const val KEY_TOKEN = "jwt_token"
+        private const val KEY_TOKEN_SAVED_AT = "jwt_token_saved_at"
         private const val KEY_INTERVAL = "update_interval"
         private const val KEY_TRACKING = "tracking_enabled"
     }

@@ -9,6 +9,9 @@ interface ApiService {
     @POST("auth/login")
     suspend fun login(@Body request: LoginRequest): Response<AuthResponse>
 
+    @POST("auth/refresh")
+    suspend fun refreshToken(): Response<AuthResponse>
+
     @POST("devices/register")
     suspend fun registerDevice(@Body request: DeviceRegisterRequest): Response<DeviceResponse>
 

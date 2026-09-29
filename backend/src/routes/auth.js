@@ -148,4 +148,24 @@ async function login(req, res, next) {
   }
 }
 
-module.exports = { register, verifyOtp, resendOtp, login };
+async function refresh(req, res, next) {
+  try {
+    const user = await User.findById(req.user.id);
+    if (!user) {
+      return res.status(401).json({ error: 'User not found' });
+    }
+
+    const token = jwt.sign({ id: user._id, email: user.email }, config.jwtSecret, {
+      expiresIn: config.jwtExpiresIn,
+    });
+
+    res.json({
+      token,
+      user: { id: user._id, email: user.email, name: user.name },
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
+module.exports = { register, verifyOtp, resendOtp, login, refresh };

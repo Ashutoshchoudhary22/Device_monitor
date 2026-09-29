@@ -1,6 +1,6 @@
 const express = require('express');
 const { authenticate } = require('../middleware/auth');
-const { register, verifyOtp, resendOtp, login } = require('../routes/auth');
+const { register, verifyOtp, resendOtp, login, refresh } = require('../routes/auth');
 const {
   registerDevice,
   getDevices,
@@ -17,6 +17,7 @@ router.post('/auth/register', register);
 router.post('/auth/verify-otp', verifyOtp);
 router.post('/auth/resend-otp', resendOtp);
 router.post('/auth/login', login);
+router.post('/auth/refresh', authenticate, refresh);
 
 router.post('/devices/register', authenticate, registerDevice);
 router.get('/devices', authenticate, getDevices);

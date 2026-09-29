@@ -76,7 +76,14 @@ class LocationForegroundService : Service() {
                 return START_NOT_STICKY
             }
             else -> {
-                promoteToForeground()
+                if (!promoteToForeground()) {
+                    // OS refused foreground (e.g. sticky restart while in background on
+                    // Android 12+). Hand over to the watchdogs instead of crashing.
+                    scheduleWatchdog()
+                    scheduleRestartJob()
+                    stopSelf()
+                    return START_NOT_STICKY
+                }
                 if (!trackingActive) {
                     startTracking()
                 }
@@ -90,17 +97,26 @@ class LocationForegroundService : Service() {
         return START_STICKY
     }
 
-    private fun promoteToForeground() {
+    private fun promoteToForeground(): Boolean {
         val notification = buildNotification()
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            ServiceCompat.startForeground(
-                this,
-                NOTIFICATION_ID,
-                notification,
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
-            )
-        } else {
-            startForeground(NOTIFICATION_ID, notification)
+        return try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                ServiceCompat.startForeground(
+                    this,
+                    NOTIFICATION_ID,
+                    notification,
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
+                )
+            } else {
+                startForeground(NOTIFICATION_ID, notification)
+            }
+            true
+        } catch (e: IllegalStateException) {
+            android.util.Log.w("LocationFgService", "startForeground not allowed", e)
+            false
+        } catch (e: SecurityException) {
+            android.util.Log.w("LocationFgService", "startForeground denied", e)
+            false
         }
     }
 
@@ -253,6 +269,7 @@ class LocationForegroundService : Service() {
         statusJob = serviceScope.launch {
             while (isActive) {
                 acquireWakeLock()
+                repository.refreshTokenIfNeeded()
                 repository.sendStatus(true)
                 repository.sendBattery()
                 repository.syncQueuedLocations()
@@ -264,10 +281,10 @@ class LocationForegroundService : Service() {
 
     override fun onTaskRemoved(rootIntent: Intent?) {
         super.onTaskRemoved(rootIntent)
-        // vivo may call this, may not — watchdog alarm already set in onStartCommand
-        // so this is just extra insurance
+        // Many OEMs kill the process right after the task is swiped away.
+        // Fire the watchdog soon so tracking comes back within seconds, not a minute.
         if (tokenManager.isTrackingEnabled()) {
-            scheduleWatchdog()
+            scheduleWatchdog(TASK_REMOVED_RESTART_DELAY_MS)
             scheduleRestartJob()
         }
     }
@@ -301,7 +318,7 @@ class LocationForegroundService : Service() {
     //
     // TrackingRestartReceiver checks if service is running; if not, restarts it.
     // -------------------------------------------------------------------------
-    private fun scheduleWatchdog() {
+    private fun scheduleWatchdog(delayMs: Long = WATCHDOG_INTERVAL_MS) {
         val intent = Intent(applicationContext, TrackingRestartReceiver::class.java)
         val pi = PendingIntent.getBroadcast(
             applicationContext,
@@ -310,7 +327,7 @@ class LocationForegroundService : Service() {
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
         val am = getSystemService(Context.ALARM_SERVICE) as AlarmManager
-        val triggerAt = SystemClock.elapsedRealtime() + WATCHDOG_INTERVAL_MS
+        val triggerAt = SystemClock.elapsedRealtime() + delayMs
 
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && !am.canScheduleExactAlarms()) {
@@ -429,10 +446,30 @@ class LocationForegroundService : Service() {
         const val ACTION_STOP = "com.devicemonitor.app.ACTION_STOP_TRACKING"
         private const val WATCHDOG_REQUEST_CODE = 3001
         private const val WATCHDOG_INTERVAL_MS = 60_000L  // 60 seconds
+        private const val TASK_REMOVED_RESTART_DELAY_MS = 5_000L
 
-        fun start(context: Context) {
+        /**
+         * Returns false if the OS refused the start. On Android 12+ a background
+         * start throws ForegroundServiceStartNotAllowedException unless the app is
+         * exempt (exact alarm, boot, battery-optimization whitelist). Letting it
+         * propagate would crash the process and break the watchdog chain.
+         */
+        fun start(context: Context): Boolean {
+            // A location-type foreground service can't call startForeground without location
+            // permission (SecurityException on Android 14), which would crash after
+            // startForegroundService. Wait until the permission flow grants it.
+            if (!PermissionHelper.hasLocationPermissions(context)) return false
             val intent = Intent(context.applicationContext, LocationForegroundService::class.java)
-            context.applicationContext.startForegroundService(intent)
+            return try {
+                context.applicationContext.startForegroundService(intent)
+                true
+            } catch (e: IllegalStateException) {
+                android.util.Log.w("LocationFgService", "Foreground service start blocked", e)
+                false
+            } catch (e: SecurityException) {
+                android.util.Log.w("LocationFgService", "Foreground service start denied", e)
+                false
+            }
         }
 
         fun stop(context: Context) {
